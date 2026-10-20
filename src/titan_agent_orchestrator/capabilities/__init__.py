@@ -1,0 +1,1 @@
+"""Capability contracts and adapters."""

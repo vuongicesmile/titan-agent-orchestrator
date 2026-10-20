@@ -1,0 +1,13 @@
+services:
+  orchestrator:
+    build: .
+    env_file: .env
+    environment:
+      ORCHESTRATOR_DATABASE_URL: sqlite:///./data/orchestrator.db
+    ports:
+      - "8010:8010"
+    volumes:
+      - orchestrator_state:/app/data
+
+volumes:
+  orchestrator_state:

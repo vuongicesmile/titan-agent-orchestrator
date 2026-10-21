@@ -5,6 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from titan_agent_orchestrator.auth import PrincipalDep
+from titan_agent_orchestrator.llm.models import ProviderStatus
 from titan_agent_orchestrator.models import (
     Conversation,
     CreateConversationInput,
@@ -37,6 +38,12 @@ def _run_or_404(run_id: str, principal: PrincipalDep, service: EngineDep) -> Run
         return service.repository.get_run(run_id, principal.org_id, principal.user_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Run was not found") from None
+
+
+@router.get("/config", response_model=list[ProviderStatus])
+def get_config(principal: PrincipalDep, service: EngineDep) -> list[ProviderStatus]:
+    """Công bố router hiện hành cho Control Plane, không kèm credential."""
+    return service.planner.llm.public_config()
 
 
 @router.post("/conversations", status_code=201)

@@ -11,7 +11,7 @@ from titan_agent_orchestrator.settings import Settings
 
 from .client import LLMClient
 from .exceptions import LLMError, LLMUnavailableError
-from .models import LLMRequest, LLMResponse, ProviderConfig, parse_json_object
+from .models import LLMRequest, LLMResponse, ProviderConfig, ProviderStatus, parse_json_object
 from .providers import PROVIDERS
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,18 @@ class ModelRouter:
     @property
     def enabled(self) -> bool:
         return bool(self.providers)
+
+    def public_config(self) -> list[ProviderStatus]:
+        """Trả trạng thái router để Control Plane hiển thị, không trả secret."""
+        return [
+            ProviderStatus(
+                provider=config.provider,
+                model=config.model,
+                base_url=config.base_url,
+                priority="primary" if index == 0 else "fallback",
+            )
+            for index, config in enumerate(self.providers)
+        ]
 
     def complete(self, request: LLMRequest, response_model: type[BaseModel] | None = None) -> LLMResponse:
         for config in self.providers:

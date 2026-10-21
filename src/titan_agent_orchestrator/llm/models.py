@@ -59,6 +59,15 @@ class LLMResponse(BaseModel):
     usage: TokenUsage = Field(default_factory=TokenUsage)
 
 
+class ProviderStatus(BaseModel):
+    """Cấu hình provider công khai; không chứa credential."""
+
+    provider: ProviderName
+    model: str
+    base_url: str
+    priority: Literal["primary", "fallback"]
+
+
 class RouterDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

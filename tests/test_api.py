@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from titan_agent_orchestrator import auth
 from titan_agent_orchestrator.main import create_app
 from titan_agent_orchestrator.models import Capability, CapabilityExecution, Principal, Proposal
+from titan_agent_orchestrator.orchestration.planner import IntentPlanner
 from titan_agent_orchestrator.persistence.sqlite import SQLiteRepository
 from titan_agent_orchestrator.settings import Settings
 
@@ -68,6 +69,34 @@ def test_data_question_creates_durable_run(monkeypatch, tmp_path):
 
     events = client.get(f"/v1/runs/{run['id']}/events", headers=headers).json()
     assert [event["kind"] for event in events] == ["run_started", "tool_started", "tool_finished"]
+
+
+def test_config_exposes_router_order_without_credentials(monkeypatch, tmp_path):
+    secret = "test-context-secret"
+    monkeypatch.setattr(auth, "settings", Settings(context_signing_secret=secret))
+    app = create_app(SQLiteRepository(f"sqlite:///{tmp_path / 'agent.db'}"), FakeGateway())
+    app.state.engine.planner = IntentPlanner(Settings(groq_api_key="private-groq", zai_api_key="private-zai"))
+    try:
+        response = TestClient(app).get("/v1/config", headers={"X-Titan-Context": signed_context(secret)})
+    finally:
+        app.state.engine.planner.llm.close()
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "provider": "groq",
+            "model": "openai/gpt-oss-120b",
+            "base_url": "https://api.groq.com/openai/v1",
+            "priority": "primary",
+        },
+        {
+            "provider": "zai",
+            "model": "glm-4.7",
+            "base_url": "https://api.z.ai/api/paas/v4",
+            "priority": "fallback",
+        },
+    ]
+    assert "private-groq" not in response.text
+    assert "private-zai" not in response.text
 
 
 def test_rejected_proposal_never_executes(monkeypatch, tmp_path):

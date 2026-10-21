@@ -215,6 +215,20 @@ def test_missing_primary_key_allows_configured_backup():
         router.close()
 
 
+def test_public_config_lists_provider_order_without_credentials():
+    router = ModelRouter(Settings(groq_api_key="primary-key", zai_api_key="backup-key"))
+    try:
+        status = router.public_config()
+    finally:
+        router.close()
+    assert [(item.provider, item.model, item.priority) for item in status] == [
+        ("groq", "openai/gpt-oss-120b", "primary"),
+        ("zai", "glm-4.7", "fallback"),
+    ]
+    assert "primary-key" not in str(status)
+    assert "backup-key" not in str(status)
+
+
 def test_no_keys_disables_llm():
     router = ModelRouter(Settings())
     try:

@@ -185,6 +185,7 @@ def test_llm_planner_answers_normal_chat_instead_of_selecting_a_capability():
     def handle(request):
         payload = json.loads(request.content)
         assert payload["messages"][0]["content"].startswith("You are Titan AI")
+        assert "MCP means Model Context" in payload["messages"][0]["content"]
         assert payload["temperature"] == 0.2
         return httpx.Response(
             200,

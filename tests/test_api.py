@@ -115,7 +115,7 @@ def test_normal_chat_uses_llm_when_no_capability_is_selected(monkeypatch, tmp_pa
 
     response = client.post(
         f"/v1/conversations/{conversation_id}/messages",
-        json={"content": "hi"},
+        json={"content": "Giúp tôi lập checklist kiểm tra thiết bị trước khi bảo trì."},
         headers=headers,
     )
 

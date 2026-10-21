@@ -26,7 +26,7 @@ class OrchestrationEngine:
         except httpx.HTTPError:
             return self._fail(run, "Unable to load the capability catalog from Titan Control Plane.")
         if proposal is None:
-            if any(term in message.casefold() for term in ("tạo yêu cầu", "tạo request", "bảo trì")):
+            if any(term in message.casefold() for term in ("tạo yêu cầu", "tạo request", "create request")):
                 response = (
                     "To create an FM request, provide the request type, title, and "
                     "supporting evidence or related equipment."

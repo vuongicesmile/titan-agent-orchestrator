@@ -36,6 +36,8 @@ class IntentPlanner:
         return self.llm.enabled
 
     def propose(self, message: str, catalog: list[Capability]) -> Proposal | None:
+        if not catalog:
+            return None
         if self._llm_enabled():
             proposed = self._propose_with_llm(message, catalog)
             if proposed is not None:

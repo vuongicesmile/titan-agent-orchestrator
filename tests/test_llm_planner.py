@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from titan_agent_orchestrator.models import Capability, Message
 from titan_agent_orchestrator.orchestration.planner import IntentPlanner
@@ -179,6 +180,17 @@ def test_backup_cannot_select_capability_outside_catalog():
             client,
         )
         assert planner.propose("Tạo yêu cầu bảo trì", []) is None
+
+
+def test_empty_catalog_does_not_spend_an_llm_call_on_capability_routing():
+    with httpx.Client(
+        transport=httpx.MockTransport(lambda request: pytest.fail("LLM must not be called"))
+    ) as client:
+        planner = IntentPlanner(
+            Settings(llm_base_url="https://llm.example/v1", llm_api_key="test-key", llm_model="test-model"),
+            client,
+        )
+        assert planner.propose("Xin chào", []) is None
 
 
 def test_llm_planner_answers_normal_chat_instead_of_selecting_a_capability():

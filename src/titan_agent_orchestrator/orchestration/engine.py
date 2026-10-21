@@ -32,12 +32,7 @@ class OrchestrationEngine:
                     "supporting evidence or related equipment."
                 )
             else:
-                response = self.planner.answer_normal_chat(
-                    self.repository.list_messages(conversation_id)
-                ) or (
-                    "I can help with general questions or route approved data and FM requests. "
-                    "Please try again in a moment if you expected an AI-generated answer."
-                )
+                response = self.planner.answer_normal_chat(self.repository.list_messages(conversation_id))
             self.repository.add_message(conversation_id, "assistant", response)
             self.repository.update_run(run.id, "completed", result={"message": response})
             self.repository.add_event(run.id, "progress", "General conversation response generated.")

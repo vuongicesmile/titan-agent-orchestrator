@@ -214,3 +214,21 @@ def test_llm_planner_answers_normal_chat_instead_of_selecting_a_capability():
         ])
 
     assert answer == "Chào bạn, tôi có thể hỗ trợ gì?"
+
+
+def test_normal_chat_uses_a_helpful_checklist_when_llm_is_unavailable():
+    planner = IntentPlanner(Settings())
+    try:
+        answer = planner.answer_normal_chat([
+            Message(
+                id="m-1",
+                conversation_id="c-1",
+                role="user",
+                content="Giúp tôi lập checklist kiểm tra thiết bị trước khi bảo trì.",
+                created_at="2026-01-01T00:00:00Z",
+            )
+        ])
+    finally:
+        planner.llm.close()
+
+    assert "cô lập năng lượng" in answer

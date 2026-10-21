@@ -44,22 +44,23 @@ class IntentPlanner:
                 return proposed
         return self._propose_with_rules(message, catalog)
 
-    def answer_normal_chat(self, history: list[Message]) -> str | None:
+    def answer_normal_chat(self, history: list[Message]) -> str:
         """Trả lời hội thoại không có capability mà không khẳng định dữ liệu chưa truy vấn."""
-        if not self._llm_enabled():
-            return None
-        messages = [{"role": "system", "content": GENERAL_CHAT_SYSTEM_PROMPT}]
-        messages.extend(
-            {"role": message.role, "content": message.content}
-            for message in history[-12:]
-        )
-        try:
-            response = self.llm.complete(
-                LLMRequest(messages=messages, temperature=0.2, max_tokens=500)
+        if self._llm_enabled():
+            messages = [{"role": "system", "content": GENERAL_CHAT_SYSTEM_PROMPT}]
+            messages.extend(
+                {"role": message.role, "content": message.content}
+                for message in history[-12:]
             )
-        except LLMError:
-            return None
-        return response.content.strip() or None
+            try:
+                response = self.llm.complete(
+                    LLMRequest(messages=messages, temperature=0.2, max_tokens=500)
+                )
+                if response.content.strip():
+                    return response.content.strip()
+            except LLMError:
+                pass
+        return _normal_chat_fallback(history[-1].content if history else "")
 
     def _propose_with_rules(self, message: str, catalog: list[Capability]) -> Proposal | None:
         content = message.casefold()
@@ -141,3 +142,23 @@ def _safe_arguments(capability: Capability, message: str) -> dict | None:
     if capability.input_schema.get("required"):
         return None
     return {}
+
+
+def _normal_chat_fallback(message: str) -> str:
+    """Câu trả lời an toàn khi provider tạm thời không phản hồi."""
+    content = message.casefold()
+    if "checklist" in content and any(term in content for term in ("bảo trì", "bao tri", "thiết bị", "thiet bi")):
+        return (
+            "Bạn có thể dùng checklist kiểm tra trước bảo trì: \n"
+            "1. Xác nhận thiết bị, vị trí và phạm vi công việc.\n"
+            "2. Kiểm tra điều kiện an toàn, cô lập năng lượng khi cần.\n"
+            "3. Ghi nhận hiện trạng, cảnh báo và bằng chứng ảnh.\n"
+            "4. Kiểm tra vật tư, dụng cụ và hướng dẫn kỹ thuật.\n"
+            "5. Sau bảo trì, chạy thử, ghi kết quả và cập nhật yêu cầu FM."
+        )
+    if any(term in content for term in ("xin chào", "chào", "hello", "hi")):
+        return "Xin chào! Tôi có thể hỗ trợ trao đổi thông thường hoặc hướng dẫn các luồng dữ liệu và FM của Titan."
+    return (
+        "Tôi có thể hỗ trợ trao đổi thông thường hoặc hướng dẫn cách truy vấn dữ liệu "
+        "và xử lý yêu cầu FM trong Titan."
+    )

@@ -49,7 +49,7 @@ def test_llm_planner_selects_catalog_capability_and_derives_safe_arguments():
     assert "test-key" not in requests[0].content.decode()
 
 
-def test_llm_planner_rejects_required_tool_arguments_invented_by_model():
+def test_llm_planner_derives_fm_request_arguments_locally_not_from_model():
     planner = IntentPlanner(
         Settings(llm_base_url="https://llm.example/v1", llm_api_key="test-key", llm_model="test-model"),
         httpx.Client(
@@ -74,7 +74,11 @@ def test_llm_planner_rejects_required_tool_arguments_invented_by_model():
         ],
     )
 
-    assert proposal is None
+    assert proposal is not None
+    assert proposal.capability == "fm.create_request"
+    assert proposal.arguments["title"] == "bảo trì AHU"
+    assert proposal.arguments["workflow_definition_id"] == "__resolve_default__"
+    assert proposal.requires_confirmation
 
 
 def test_planner_uses_backup_and_keeps_original_question():

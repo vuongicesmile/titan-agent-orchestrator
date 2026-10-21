@@ -51,11 +51,18 @@ def create_conversation(body: CreateConversationInput, principal: PrincipalDep, 
     return service.repository.create_conversation(principal.org_id, principal.user_id, body.title.strip())
 
 
+@router.get("/conversations", response_model=list[Conversation])
+def list_conversations(principal: PrincipalDep, service: EngineDep, limit: int = 20) -> list[Conversation]:
+    """Liệt kê hội thoại gần nhất; nội dung chỉ được trả qua endpoint chi tiết."""
+    return service.repository.list_conversations(principal.org_id, principal.user_id, min(max(limit, 1), 50))
+
+
 @router.get("/conversations/{conversation_id}")
 def get_conversation(conversation_id: str, principal: PrincipalDep, service: EngineDep) -> dict:
     conversation = _conversation_or_404(conversation_id, principal, service)
     messages = service.repository.list_messages(conversation_id)
-    return {"conversation": conversation, "messages": messages}
+    runs = service.repository.list_runs(conversation_id, principal.org_id, principal.user_id)
+    return {"conversation": conversation, "messages": messages, "runs": runs}
 
 
 @router.post("/conversations/{conversation_id}/messages", status_code=202)

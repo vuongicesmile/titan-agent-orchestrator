@@ -66,7 +66,20 @@ class IntentPlanner:
         content = message.casefold()
         wanted = None
         arguments: dict = {}
-        if any(term in content for term in ("quá hạn", "qua han")):
+        if any(term in content for term in ("publish dashboard", "xuất bản dashboard", "xuất bản báo cáo", "publish report")):
+            wanted = "reports.publish_draft"
+            arguments = {"session_id": "__resolve_latest__"}
+        elif any(term in content for term in ("tạo dashboard", "tao dashboard", "tạo báo cáo", "tao bao cao", "create dashboard", "create report")):
+            wanted = "reports.create_draft"
+            arguments = {"prompt": message}
+        elif any(term in content for term in ("danh sách dashboard", "danh sach dashboard", "dashboard hiện có", "bao cao hien co", "list dashboards", "list reports")):
+            wanted = "reports.list"
+        elif any(term in content for term in ("tạo yêu cầu", "tao yeu cau", "tạo request", "create request")):
+            wanted = "fm.create_request"
+            arguments = _request_arguments(message)
+        elif any(term in content for term in ("phê duyệt chờ", "phe duyet cho", "chờ duyệt", "cho duyet", "pending approval")):
+            wanted = "fm.get_pending_approvals"
+        elif any(term in content for term in ("quá hạn", "qua han")):
             wanted = "fm.get_overdue_requests"
         elif any(term in content for term in ("yêu cầu", "yeu cau", "request")) and any(
             term in content for term in ("mở", "mo", "danh sách", "danh sach", "gần đây", "gan day")
@@ -122,14 +135,18 @@ class IntentPlanner:
     @staticmethod
     def _proposal(capability: Capability, arguments: dict) -> Proposal:
         requires_confirmation = capability.requires_confirmation or capability.write
+        if capability.name == "reports.create_draft":
+            summary = "Đã chuẩn bị tạo bản nháp dashboard. Hãy xác nhận để Titan AI thiết kế và xem trước dữ liệu."
+        elif capability.name == "reports.publish_draft":
+            summary = "Đã chuẩn bị publish bản nháp dashboard gần nhất. Hãy xác nhận để chạy job publish."
+        elif requires_confirmation:
+            summary = "FM action prepared; confirmation is required before execution."
+        else:
+            summary = "Read-only data capability selected."
         return Proposal(
             capability=capability.name,
             arguments=arguments,
-            summary=(
-                "FM action prepared; confirmation is required before execution."
-                if requires_confirmation
-                else "Read-only data capability selected."
-            ),
+            summary=summary,
             proposal_hash=_hash(capability.name, arguments),
             requires_confirmation=requires_confirmation,
         )
@@ -139,9 +156,44 @@ def _safe_arguments(capability: Capability, message: str) -> dict | None:
     """Không đưa output của LLM vào input tool; chỉ mở rộng sau khi đã kiểm duyệt capability."""
     if capability.name == "data.answer_question":
         return {"question": message}
+    if capability.name == "fm.create_request":
+        return _request_arguments(message)
+    if capability.name == "reports.create_draft":
+        return {"prompt": message}
+    if capability.name == "reports.publish_draft":
+        return {"session_id": "__resolve_latest__"}
     if capability.input_schema.get("required"):
         return None
     return {}
+
+
+def _request_arguments(message: str) -> dict:
+    """Trích xuất trường an toàn, có thể kiểm tra được từ câu tạo yêu cầu.
+
+    Không lấy argument tool từ output của LLM. Workflow được engine chọn từ
+    workflow đang active của tenant trước khi hiện hộp xác nhận.
+    """
+    content = message.casefold()
+    priority = "medium"
+    if any(term in content for term in ("khẩn", "urgent", "critical")):
+        priority = "critical"
+    elif any(term in content for term in ("ưu tiên cao", "cao", "high")):
+        priority = "high"
+    elif any(term in content for term in ("ưu tiên thấp", "thấp", "low")):
+        priority = "low"
+    title = message.strip()
+    for prefix in ("tạo yêu cầu fm", "tạo yêu cầu", "tao yeu cau fm", "tao yeu cau", "create fm request", "create request"):
+        if title.casefold().startswith(prefix):
+            title = title[len(prefix):].lstrip(" :,-") or message.strip()
+            break
+    return {
+        "workflow_definition_id": "__resolve_default__",
+        "request_type": "facility_request",
+        "title": title[:255],
+        "description": message.strip(),
+        "priority": priority,
+        "context": {},
+    }
 
 
 def _normal_chat_fallback(message: str) -> str:

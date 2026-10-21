@@ -103,6 +103,16 @@ class SQLiteRepository:
             raise KeyError("Conversation was not found")
         return self._conversation(row)
 
+    def list_conversations(self, org_id: str, user_id: str, limit: int = 20) -> list[Conversation]:
+        """Đọc lịch sử hội thoại gần nhất trong đúng phạm vi tenant và người dùng."""
+        with self._connection() as database:
+            rows = database.execute(
+                "SELECT * FROM conversations WHERE org_id=? AND user_id=? "
+                "ORDER BY updated_at DESC, id DESC LIMIT ?",
+                (org_id, user_id, limit),
+            ).fetchall()
+        return [self._conversation(row) for row in rows]
+
     def add_message(self, conversation_id: str, role: str, content: str) -> Message:
         now, identity = _now(), uuid4().hex
         with self._connection() as database:
@@ -150,6 +160,16 @@ class SQLiteRepository:
         if row is None:
             raise KeyError("Run was not found")
         return self._run(row)
+
+    def list_runs(self, conversation_id: str, org_id: str, user_id: str) -> list[Run]:
+        """Đọc run theo thứ tự tạo để khôi phục trạng thái tool của hội thoại."""
+        with self._connection() as database:
+            rows = database.execute(
+                "SELECT * FROM runs WHERE conversation_id=? AND org_id=? AND user_id=? "
+                "ORDER BY created_at, id",
+                (conversation_id, org_id, user_id),
+            ).fetchall()
+        return [self._run(row) for row in rows]
 
     def update_run(
         self,

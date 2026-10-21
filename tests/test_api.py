@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -97,6 +98,33 @@ def test_config_exposes_router_order_without_credentials(monkeypatch, tmp_path):
     ]
     assert "private-groq" not in response.text
     assert "private-zai" not in response.text
+
+
+def test_normal_chat_uses_llm_when_no_capability_is_selected(monkeypatch, tmp_path):
+    secret = "test-context-secret"
+    monkeypatch.setattr(auth, "settings", Settings(context_signing_secret=secret))
+    repository = SQLiteRepository(f"sqlite:///{tmp_path / 'agent.db'}")
+    app = create_app(repository, FakeGateway())
+    app.state.engine.planner = SimpleNamespace(
+        propose=lambda message, catalog: None,
+        answer_normal_chat=lambda history: "Hello! How can I help with Titan Data?",
+    )
+    client = TestClient(app)
+    headers = {"X-Titan-Context": signed_context(secret)}
+    conversation_id = client.post("/v1/conversations", json={}, headers=headers).json()["id"]
+
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        json={"content": "hi"},
+        headers=headers,
+    )
+
+    assert response.status_code == 202
+    run = response.json()
+    assert run["status"] == "completed"
+    assert run["result"] == {"message": "Hello! How can I help with Titan Data?"}
+    events = client.get(f"/v1/runs/{run['id']}/events", headers=headers).json()
+    assert [event["kind"] for event in events] == ["run_started", "progress"]
 
 
 def test_rejected_proposal_never_executes(monkeypatch, tmp_path):

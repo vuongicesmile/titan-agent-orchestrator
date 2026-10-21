@@ -14,7 +14,8 @@ import httpx
 from titan_agent_orchestrator.llm.exceptions import LLMError
 from titan_agent_orchestrator.llm.models import LLMRequest, RouterDecision, parse_json_object
 from titan_agent_orchestrator.llm.router import ModelRouter
-from titan_agent_orchestrator.models import Capability, Proposal
+from titan_agent_orchestrator.models import Capability, Message, Proposal
+from titan_agent_orchestrator.prompts.chat import GENERAL_CHAT_SYSTEM_PROMPT
 from titan_agent_orchestrator.prompts.planner import CAPABILITY_ROUTER_SYSTEM_PROMPT
 from titan_agent_orchestrator.settings import Settings, settings
 
@@ -40,6 +41,23 @@ class IntentPlanner:
             if proposed is not None:
                 return proposed
         return self._propose_with_rules(message, catalog)
+
+    def answer_normal_chat(self, history: list[Message]) -> str | None:
+        """Trả lời hội thoại không có capability mà không khẳng định dữ liệu chưa truy vấn."""
+        if not self._llm_enabled():
+            return None
+        messages = [{"role": "system", "content": GENERAL_CHAT_SYSTEM_PROMPT}]
+        messages.extend(
+            {"role": message.role, "content": message.content}
+            for message in history[-12:]
+        )
+        try:
+            response = self.llm.complete(
+                LLMRequest(messages=messages, temperature=0.2, max_tokens=500)
+            )
+        except LLMError:
+            return None
+        return response.content.strip() or None
 
     def _propose_with_rules(self, message: str, catalog: list[Capability]) -> Proposal | None:
         content = message.casefold()

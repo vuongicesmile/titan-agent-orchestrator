@@ -4,7 +4,7 @@ import json
 
 import httpx
 
-from titan_agent_orchestrator.models import Capability
+from titan_agent_orchestrator.models import Capability, Message
 from titan_agent_orchestrator.orchestration.planner import IntentPlanner
 from titan_agent_orchestrator.settings import Settings
 
@@ -179,3 +179,25 @@ def test_backup_cannot_select_capability_outside_catalog():
             client,
         )
         assert planner.propose("Tạo yêu cầu bảo trì", []) is None
+
+
+def test_llm_planner_answers_normal_chat_instead_of_selecting_a_capability():
+    def handle(request):
+        payload = json.loads(request.content)
+        assert payload["messages"][0]["content"].startswith("You are Titan AI")
+        assert payload["temperature"] == 0.2
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "Chào bạn, tôi có thể hỗ trợ gì?"}}]},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        planner = IntentPlanner(
+            Settings(llm_base_url="https://llm.example/v1", llm_api_key="test-key", llm_model="test-model"),
+            client,
+        )
+        answer = planner.answer_normal_chat([
+            Message(id="m-1", conversation_id="c-1", role="user", content="hi", created_at="2026-01-01T00:00:00Z")
+        ])
+
+    assert answer == "Chào bạn, tôi có thể hỗ trợ gì?"

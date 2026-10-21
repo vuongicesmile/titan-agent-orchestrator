@@ -1,7 +1,12 @@
 """Cấu hình runtime của Orchestrator."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+def _env(name: str, default: str = "", *, secret: bool = False):
+    """Đọc env khi tạo Settings để có thể nạp lại cấu hình và kiểm thử độc lập."""
+    return field(default_factory=lambda: os.getenv(name, default), repr=not secret)
 
 
 @dataclass(frozen=True)
@@ -13,10 +18,21 @@ class Settings:
     allow_dev_context: bool = os.getenv("ORCHESTRATOR_ALLOW_DEV_CONTEXT", "false").lower() == "true"
     # Endpoint tương thích OpenAI chỉ dùng để lập kế hoạch intent. Key chỉ ở
     # Orchestrator và không bao giờ được chuyển đến Control Plane.
-    llm_base_url: str = os.getenv("LLM_BASE_URL", "").rstrip("/")
-    llm_api_key: str = os.getenv("LLM_API_KEY", "")
-    llm_model: str = os.getenv("LLM_MODEL", "")
-    llm_timeout_s: float = float(os.getenv("LLM_TIMEOUT_S", "30"))
+    llm_base_url: str = _env("LLM_BASE_URL")
+    llm_api_key: str = _env("LLM_API_KEY", secret=True)
+    llm_model: str = _env("LLM_MODEL")
+    llm_timeout_s: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT_S", "30")))
+    llm_provider: str = _env("LLM_PROVIDER", "groq")
+    llm_fallback_provider: str = _env("LLM_FALLBACK_PROVIDER", "zai")
+    groq_api_key: str = _env("GROQ_API_KEY", secret=True)
+    groq_base_url: str = _env("GROQ_BASE_URL")
+    groq_model: str = _env("GROQ_MODEL")
+    zai_api_key: str = _env("ZAI_API_KEY", secret=True)
+    zai_base_url: str = _env("ZAI_BASE_URL")
+    zai_model: str = _env("ZAI_MODEL")
+    gemini_api_key: str = _env("GEMINI_API_KEY", secret=True)
+    gemini_base_url: str = _env("GEMINI_BASE_URL")
+    gemini_model: str = _env("GEMINI_MODEL")
 
 
 settings = Settings()

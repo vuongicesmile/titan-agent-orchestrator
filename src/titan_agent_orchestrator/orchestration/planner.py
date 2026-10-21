@@ -11,6 +11,9 @@ import json
 
 import httpx
 
+from titan_agent_orchestrator.llm.exceptions import LLMError
+from titan_agent_orchestrator.llm.models import LLMRequest, RouterDecision, parse_json_object
+from titan_agent_orchestrator.llm.router import ModelRouter
 from titan_agent_orchestrator.models import Capability, Proposal
 from titan_agent_orchestrator.prompts.planner import CAPABILITY_ROUTER_SYSTEM_PROMPT
 from titan_agent_orchestrator.settings import Settings, settings
@@ -26,10 +29,10 @@ class IntentPlanner:
 
     def __init__(self, runtime_settings: Settings | None = None, client: httpx.Client | None = None) -> None:
         self.settings = runtime_settings or settings
-        self.client = client or httpx.Client(timeout=self.settings.llm_timeout_s, trust_env=False)
+        self.llm = ModelRouter(self.settings, client)
 
     def _llm_enabled(self) -> bool:
-        return bool(self.settings.llm_base_url and self.settings.llm_api_key and self.settings.llm_model)
+        return self.llm.enabled
 
     def propose(self, message: str, catalog: list[Capability]) -> Proposal | None:
         if self._llm_enabled():
@@ -67,31 +70,23 @@ class IntentPlanner:
             for capability in catalog
         ]
         try:
-            response = self.client.post(
-                f"{self.settings.llm_base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.settings.llm_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.settings.llm_model,
-                    "messages": [
+            response = self.llm.complete(
+                LLMRequest(
+                    messages=[
                         {"role": "system", "content": CAPABILITY_ROUTER_SYSTEM_PROMPT},
                         {
                             "role": "user",
                             "content": json.dumps(
-                                {"request": message, "catalog": safe_catalog}, ensure_ascii=False
+                                {"request": message, "catalog": safe_catalog},
+                                ensure_ascii=False,
                             ),
                         },
-                    ],
-                    "temperature": 0,
-                    "max_tokens": 180,
-                },
+                    ]
+                ),
+                response_model=RouterDecision,
             )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"].get("content") or ""
-            selected = _json_object(content).get("capability")
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
+            selected = RouterDecision.model_validate(parse_json_object(response.content)).capability
+        except (LLMError, ValueError):
             return None
         if not isinstance(selected, str):
             return None
@@ -126,14 +121,3 @@ def _safe_arguments(capability: Capability, message: str) -> dict | None:
     if capability.input_schema.get("required"):
         return None
     return {}
-
-
-def _json_object(content: str) -> dict:
-    """Nhận JSON object kể cả khi endpoint tương thích bọc nội dung trong markdown fence."""
-    cleaned = content.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    value = json.loads(cleaned)
-    if not isinstance(value, dict):
-        raise ValueError("LLM planner response must be an object")
-    return value

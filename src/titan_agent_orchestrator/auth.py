@@ -1,4 +1,4 @@
-"""Verify the trusted user context forwarded by Titan Control Plane."""
+"""Xác thực user context đáng tin cậy do Titan Control Plane chuyển tiếp."""
 
 import base64
 import hashlib

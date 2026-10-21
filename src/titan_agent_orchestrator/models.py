@@ -1,4 +1,4 @@
-"""Public request and response models."""
+"""Model request và response công khai."""
 
 from __future__ import annotations
 

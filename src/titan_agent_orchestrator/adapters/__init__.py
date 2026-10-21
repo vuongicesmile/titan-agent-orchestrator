@@ -1,1 +1,1 @@
-"""External service adapters."""
+"""Adapter kết nối các dịch vụ bên ngoài."""

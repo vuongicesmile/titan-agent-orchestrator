@@ -1,1 +1,1 @@
-"""Persistence adapters."""
+"""Adapter lưu trữ dữ liệu."""

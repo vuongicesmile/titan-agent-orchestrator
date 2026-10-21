@@ -1,4 +1,4 @@
-"""Allowed run transitions."""
+"""Các trạng thái chuyển đổi hợp lệ của run."""
 
 from titan_agent_orchestrator.models import RunStatus
 

@@ -1,1 +1,1 @@
-"""Capability contracts and adapters."""
+"""Contract và adapter cho capability."""

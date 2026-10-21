@@ -1,4 +1,4 @@
-"""HTTP adapter for the capability gateway hosted by Titan Control Plane."""
+"""HTTP adapter cho capability gateway do Titan Control Plane cung cấp."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class TitanCapabilityGateway:
             "X-Titan-Permissions": ",".join(sorted(principal.permissions)),
         }
         if self.service_token:
-            headers["Authorization"] = "Bearer " + self.service_token
+            headers["X-Titan-Agent-Gateway-Token"] = self.service_token
         return headers
 
     def catalog(self, principal: Principal) -> list[Capability]:

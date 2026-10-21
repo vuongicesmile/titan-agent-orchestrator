@@ -29,7 +29,7 @@ class FakeGateway:
         return CapabilityExecution(
             capability=capability,
             arguments=arguments,
-            result={"answer": "Đã nhận câu hỏi", "run_id": run_id},
+            result={"answer": "Question received", "run_id": run_id},
         )
 
 
@@ -64,7 +64,7 @@ def test_data_question_creates_durable_run(monkeypatch, tmp_path):
     assert response.status_code == 202
     run = response.json()
     assert run["status"] == "completed"
-    assert run["result"]["answer"] == "Đã nhận câu hỏi"
+    assert run["result"]["answer"] == "Question received"
 
     events = client.get(f"/v1/runs/{run['id']}/events", headers=headers).json()
     assert [event["kind"] for event in events] == ["run_started", "tool_started", "tool_finished"]

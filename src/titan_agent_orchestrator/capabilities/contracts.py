@@ -1,4 +1,4 @@
-"""Ports for capability catalog and execution."""
+"""Port cho capability catalog và execution."""
 
 from typing import Protocol
 

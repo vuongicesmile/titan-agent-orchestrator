@@ -1,4 +1,4 @@
-"""SQLite repository for local development and deterministic tests."""
+"""SQLite repository cho phát triển local và test xác định."""
 
 from __future__ import annotations
 

@@ -1,11 +1,30 @@
+name: titan-agent-orchestrator
+
 services:
   orchestrator:
     build: .
-    env_file: .env
+    image: titan-agent-orchestrator:dev
+    restart: unless-stopped
     environment:
       ORCHESTRATOR_DATABASE_URL: sqlite:///./data/orchestrator.db
+      TITAN_CONTROL_PLANE_URL: ${TITAN_CONTROL_PLANE_URL:-http://host.docker.internal:8000}
+      TITAN_CAPABILITY_GATEWAY_TOKEN: ${TITAN_CAPABILITY_GATEWAY_TOKEN:-}
+      TITAN_CONTEXT_SIGNING_SECRET: ${TITAN_CONTEXT_SIGNING_SECRET:-}
+      ORCHESTRATOR_ALLOW_DEV_CONTEXT: "false"
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-30}
     ports:
-      - "8010:8010"
+      - "127.0.0.1:${ORCHESTRATOR_PORT:-8010}:8010"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     volumes:
       - orchestrator_state:/app/data
 

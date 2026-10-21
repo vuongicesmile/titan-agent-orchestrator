@@ -1,4 +1,4 @@
-"""FastAPI application entry point."""
+"""Điểm khởi tạo ứng dụng FastAPI."""
 
 from fastapi import FastAPI
 

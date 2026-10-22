@@ -52,7 +52,9 @@ class OrchestrationEngine:
         if proposal.capability == "reports.publish_draft":
             prepared = self._prepare_report_publish(proposal, principal, run)
             if prepared is None:
-                response = "Chưa có bản nháp dashboard trong hội thoại này để publish. Hãy tạo và kiểm tra bản nháp trước."
+                response = (
+                    "Chưa có bản nháp dashboard trong hội thoại này để publish. Hãy tạo và kiểm tra bản nháp trước."
+                )
                 self.repository.add_message(conversation_id, "assistant", response)
                 self.repository.update_run(run.id, "completed", result={"message": response})
                 self.repository.add_event(run.id, "progress", "No dashboard draft was available for publishing.")
@@ -107,9 +109,7 @@ class OrchestrationEngine:
             )
         result = {**execution.result, "message": _humanize_result(proposal.capability, execution.result)}
         self.repository.update_run(run.id, "completed", proposal=proposal, result=result)
-        self.repository.add_event(
-            run.id, "tool_finished", "Capability completed.", {"capability": proposal.capability}
-        )
+        self.repository.add_event(run.id, "tool_finished", "Capability completed.", {"capability": proposal.capability})
         self.repository.add_message(
             run.conversation_id,
             "assistant",
@@ -197,9 +197,39 @@ def _humanize_result(capability: str, result: dict) -> str:
     """Chuyển kết quả tool thành câu trả lời người dùng đọc được; raw chỉ nằm trong trace."""
     if capability == "data.answer_question":
         answer = result.get("answer")
-        return answer.strip() if isinstance(answer, str) and answer.strip() else "Không tìm thấy câu trả lời từ dữ liệu được cấp quyền."
+        return (
+            answer.strip()
+            if isinstance(answer, str) and answer.strip()
+            else "Không tìm thấy câu trả lời từ dữ liệu được cấp quyền."
+        )
 
     items = _items_from_result(result)
+    if capability == "fm.get_data_profiling_overview":
+        return _format_profiling_overview(_first_result(result))
+    if capability == "fm.list_data_profiling_assets":
+        return _format_profiling_assets(items)
+    if capability == "fm.run_data_profiling":
+        profile = _first_result(result)
+        if not profile:
+            return "Đã chạy đánh giá dữ liệu. Mở trang Đánh giá dữ liệu để xem kết quả chi tiết."
+        profile_result = profile.get("result") if isinstance(profile.get("result"), dict) else profile
+        connection_id = profile.get("connection_id") or profile_result.get("connection_id")
+        table = profile.get("table") or profile_result.get("table")
+        score = profile_result.get("quality_score")
+        status = profile_result.get("status")
+        target = "/".join(str(value) for value in (connection_id, table) if value)
+        details = []
+        if target:
+            details.append(f"**{target}**")
+        if isinstance(score, (int, float)):
+            details.append(f"điểm chất lượng **{score}/100**")
+        if isinstance(status, str):
+            details.append(f"trạng thái **{status.upper()}**")
+        return (
+            "Đã lưu kết quả đánh giá"
+            + (": " + " · ".join(details) if details else ".")
+            + ". Mở trang Đánh giá dữ liệu để xem chi tiết."
+        )
     if capability == "fm.list_requests":
         if not items:
             return "Không tìm thấy yêu cầu FM nào trong phạm vi bạn có quyền xem."
@@ -239,6 +269,86 @@ def _humanize_result(capability: str, result: dict) -> str:
         report = result.get("report")
         return f"Đã gửi job publish dashboard{f' **{report}**' if isinstance(report, str) else ''}."
     return "Đã hoàn tất thao tác FM."
+
+
+def _format_profiling_overview(overview: dict | None) -> str:
+    """Tóm tắt an toàn từ aggregate profile; raw sample không được đưa vào chat."""
+    if not overview:
+        return "Không nhận được kết quả tổng hợp profiling. Bạn có thể thử lại từ trang Đánh giá dữ liệu."
+    totals = overview.get("totals") if isinstance(overview.get("totals"), dict) else {}
+    assets = overview.get("assets") if isinstance(overview.get("assets"), list) else []
+    layer = str(overview.get("layer") or "bronze").upper()
+    asset_count = totals.get("assets") if isinstance(totals.get("assets"), int) else len(assets)
+    if not asset_count:
+        return (
+            f"Chưa có kết quả profiling cho lớp **{layer}** trong phạm vi đã chọn. "
+            "Bạn có thể mở trang Đánh giá dữ liệu để chọn raw asset và chạy đánh giá."
+        )
+    statuses = totals.get("statuses") if isinstance(totals.get("statuses"), dict) else {}
+    score = totals.get("quality_score")
+    profiled_rows = totals.get("profiled_rows")
+    first_line = f"**Đánh giá dữ liệu {layer}:** {asset_count} asset đã có kết quả"
+    if isinstance(score, (int, float)):
+        first_line += f", điểm chất lượng trung bình **{score}/100**"
+    if isinstance(profiled_rows, int):
+        first_line += f" trên **{profiled_rows:,}** dòng"
+    first_line += "."
+    status_line = " · ".join(
+        f"{str(status).upper()}: {count}"
+        for status, count in (
+            ("pass", statuses.get("pass", 0)),
+            ("warn", statuses.get("warn", 0)),
+            ("fail", statuses.get("fail", 0)),
+        )
+    )
+    findings: list[str] = []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        profile = asset.get("result") if isinstance(asset.get("result"), dict) else {}
+        if profile.get("status") not in {"warn", "fail"}:
+            continue
+        issues = profile.get("violations") if isinstance(profile.get("violations"), list) else []
+        issue = next((item for item in issues if isinstance(item, dict) and isinstance(item.get("message"), str)), None)
+        target = "/".join(str(value) for value in (asset.get("connection_id"), asset.get("table")) if value)
+        level = str(profile.get("status", "warn")).upper()
+        if target:
+            finding = f"- **{target}** · {level}"
+            if issue:
+                finding += f" — {issue['message']}"
+            findings.append(finding)
+        if len(findings) == 3:
+            break
+    response = [first_line, status_line]
+    if findings:
+        response.extend(["", "Ưu tiên rà soát:", *findings])
+    else:
+        response.extend(["", "Không có asset WARN hoặc FAIL trong kết quả hiện tại."])
+    response.extend(["", "Mở trang **Đánh giá dữ liệu** để xem dimension, schema và từng lượt profiling."])
+    return "\n".join(response)
+
+
+def _format_profiling_assets(items: list[dict]) -> str:
+    if not items:
+        return "Chưa tìm thấy raw asset BMS hoặc SPO có thể đánh giá trong kết nối FM MCP hiện tại."
+    tables = [
+        f"**{asset.get('connection_id', 'source')}**: "
+        + ", ".join(
+            str(table.get("table"))
+            for table in asset.get("tables", [])[:5]
+            if isinstance(table, dict) and table.get("table")
+        )
+        for asset in items
+        if isinstance(asset, dict)
+    ]
+    tables = [item for item in tables if not item.endswith(": ")]
+    if not tables:
+        return "Đã tìm thấy raw asset, nhưng chưa có bảng nào sẵn sàng để đánh giá."
+    return (
+        "Nguồn dữ liệu có thể đánh giá:\n"
+        + "\n".join(f"- {item}" for item in tables[:8])
+        + "\n\nMở trang **Đánh giá dữ liệu** để chọn bảng và chạy profiling."
+    )
 
 
 def _first_result(result: dict) -> dict | None:

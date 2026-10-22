@@ -187,14 +187,80 @@ def test_backup_cannot_select_capability_outside_catalog():
 
 
 def test_empty_catalog_does_not_spend_an_llm_call_on_capability_routing():
-    with httpx.Client(
-        transport=httpx.MockTransport(lambda request: pytest.fail("LLM must not be called"))
-    ) as client:
+    with httpx.Client(transport=httpx.MockTransport(lambda request: pytest.fail("LLM must not be called"))) as client:
         planner = IntentPlanner(
             Settings(llm_base_url="https://llm.example/v1", llm_api_key="test-key", llm_model="test-model"),
             client,
         )
         assert planner.propose("Xin chào", []) is None
+
+
+def test_rule_planner_routes_profiling_overview_with_controlled_filters():
+    planner = IntentPlanner(Settings())
+    proposal = planner.propose(
+        "Đánh giá chất lượng dữ liệu Bronze tháng 10 năm 2026, gồm dữ liệu demo",
+        [
+            Capability(
+                name="fm.get_data_profiling_overview",
+                description="Return profiling quality scores and findings.",
+                input_schema={"type": "object"},
+            )
+        ],
+    )
+
+    assert proposal is not None
+    assert proposal.capability == "fm.get_data_profiling_overview"
+    assert proposal.arguments == {"layer": "bronze", "month": 10, "year": 2026, "include_demo": True}
+    assert not proposal.requires_confirmation
+
+
+def test_profiling_rule_precedes_llm_selection_of_a_mutating_fixture():
+    planner = IntentPlanner(
+        Settings(llm_base_url="https://llm.example/v1", llm_api_key="test-key", llm_model="test-model"),
+        httpx.Client(transport=httpx.MockTransport(lambda request: pytest.fail("LLM must not choose profiling tools"))),
+    )
+    proposal = planner.propose(
+        "Đánh giá chất lượng dữ liệu Bronze gồm dữ liệu demo",
+        [
+            Capability(
+                name="fm.get_data_profiling_overview",
+                description="Return profiling quality scores and findings.",
+                input_schema={"type": "object"},
+            ),
+            Capability(
+                name="fm.seed_data_profiling_demo",
+                description="Create demo profiling fixtures.",
+                input_schema={"type": "object"},
+                write=True,
+                requires_confirmation=True,
+            ),
+        ],
+    )
+
+    assert proposal is not None
+    assert proposal.capability == "fm.get_data_profiling_overview"
+    assert proposal.arguments == {"layer": "bronze", "include_demo": True}
+
+
+def test_rule_planner_requires_confirmation_for_explicit_profiling_target():
+    planner = IntentPlanner(Settings())
+    proposal = planner.propose(
+        "Chạy data profiling cho bms_fake/cov_events",
+        [
+            Capability(
+                name="fm.run_data_profiling",
+                description="Profile one raw asset and persist its result.",
+                input_schema={"type": "object", "required": ["connection_id", "table"]},
+                write=True,
+                requires_confirmation=True,
+            )
+        ],
+    )
+
+    assert proposal is not None
+    assert proposal.capability == "fm.run_data_profiling"
+    assert proposal.arguments == {"connection_id": "bms_fake", "table": "cov_events"}
+    assert proposal.requires_confirmation
 
 
 def test_llm_planner_answers_normal_chat_instead_of_selecting_a_capability():
@@ -213,9 +279,9 @@ def test_llm_planner_answers_normal_chat_instead_of_selecting_a_capability():
             Settings(llm_base_url="https://llm.example/v1", llm_api_key="test-key", llm_model="test-model"),
             client,
         )
-        answer = planner.answer_normal_chat([
-            Message(id="m-1", conversation_id="c-1", role="user", content="hi", created_at="2026-01-01T00:00:00Z")
-        ])
+        answer = planner.answer_normal_chat(
+            [Message(id="m-1", conversation_id="c-1", role="user", content="hi", created_at="2026-01-01T00:00:00Z")]
+        )
 
     assert answer == "Chào bạn, tôi có thể hỗ trợ gì?"
 
@@ -223,15 +289,17 @@ def test_llm_planner_answers_normal_chat_instead_of_selecting_a_capability():
 def test_normal_chat_uses_a_helpful_checklist_when_llm_is_unavailable():
     planner = IntentPlanner(Settings())
     try:
-        answer = planner.answer_normal_chat([
-            Message(
-                id="m-1",
-                conversation_id="c-1",
-                role="user",
-                content="Giúp tôi lập checklist kiểm tra thiết bị trước khi bảo trì.",
-                created_at="2026-01-01T00:00:00Z",
-            )
-        ])
+        answer = planner.answer_normal_chat(
+            [
+                Message(
+                    id="m-1",
+                    conversation_id="c-1",
+                    role="user",
+                    content="Giúp tôi lập checklist kiểm tra thiết bị trước khi bảo trì.",
+                    created_at="2026-01-01T00:00:00Z",
+                )
+            ]
+        )
     finally:
         planner.llm.close()
 

@@ -13,8 +13,8 @@ from fastapi.testclient import TestClient
 from titan_agent_orchestrator import auth
 from titan_agent_orchestrator.main import create_app
 from titan_agent_orchestrator.models import Capability, CapabilityExecution, Principal, Proposal
+from titan_agent_orchestrator.orchestration.engine import _capability_failure_message, _humanize_result
 from titan_agent_orchestrator.orchestration.planner import IntentPlanner
-from titan_agent_orchestrator.orchestration.engine import _capability_failure_message
 from titan_agent_orchestrator.persistence.sqlite import SQLiteRepository
 from titan_agent_orchestrator.settings import Settings
 
@@ -198,6 +198,41 @@ def test_normal_chat_uses_llm_when_no_capability_is_selected(monkeypatch, tmp_pa
     assert [event["kind"] for event in events] == ["run_started", "progress"]
 
 
+def test_profiling_overview_is_humanized_without_raw_tool_payload():
+    response = _humanize_result(
+        "fm.get_data_profiling_overview",
+        {
+            "result": {
+                "structuredContent": {
+                    "result": {
+                        "layer": "bronze",
+                        "totals": {
+                            "assets": 2,
+                            "profiled_rows": 209,
+                            "quality_score": 81.5,
+                            "statuses": {"pass": 1, "warn": 0, "fail": 1},
+                        },
+                        "assets": [
+                            {
+                                "connection_id": "bms_fake",
+                                "table": "cov_events",
+                                "result": {
+                                    "status": "fail",
+                                    "violations": [{"message": "3 negative readings require review."}],
+                                },
+                            }
+                        ],
+                    }
+                }
+            }
+        },
+    )
+
+    assert "Đánh giá dữ liệu BRONZE" in response
+    assert "bms_fake/cov_events" in response
+    assert "3 negative readings require review." in response
+
+
 def test_conversation_history_is_scoped_and_ordered(monkeypatch, tmp_path):
     secret = "test-context-secret"
     monkeypatch.setattr(auth, "settings", Settings(context_signing_secret=secret))
@@ -324,7 +359,9 @@ def test_dashboard_draft_then_publish_uses_the_same_conversation_draft(monkeypat
 
 
 def test_capability_http_failure_does_not_claim_the_gateway_is_unreachable():
-    request = httpx.Request("POST", "http://titan-api:8000/api/internal/agent/capabilities/reports.create_draft/execute")
+    request = httpx.Request(
+        "POST", "http://titan-api:8000/api/internal/agent/capabilities/reports.create_draft/execute"
+    )
     error = httpx.HTTPStatusError("bad gateway", request=request, response=httpx.Response(502, request=request))
 
     message = _capability_failure_message("reports.create_draft", error)

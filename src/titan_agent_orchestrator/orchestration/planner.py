@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 import httpx
 
@@ -38,6 +39,11 @@ class IntentPlanner:
     def propose(self, message: str, catalog: list[Capability]) -> Proposal | None:
         if not catalog:
             return None
+        # Profiling có các tool đọc và ghi gần tên nhau. Chọn theo rule đã kiểm
+        # duyệt trước khi gọi LLM để một từ như "demo" không thể đổi câu hỏi
+        # review thành mutation tạo fixture.
+        if _is_profiling_request(message.casefold()):
+            return self._propose_with_rules(message, catalog)
         if self._llm_enabled():
             proposed = self._propose_with_llm(message, catalog)
             if proposed is not None:
@@ -48,14 +54,9 @@ class IntentPlanner:
         """Trả lời hội thoại không có capability mà không khẳng định dữ liệu chưa truy vấn."""
         if self._llm_enabled():
             messages = [{"role": "system", "content": GENERAL_CHAT_SYSTEM_PROMPT}]
-            messages.extend(
-                {"role": message.role, "content": message.content}
-                for message in history[-12:]
-            )
+            messages.extend({"role": message.role, "content": message.content} for message in history[-12:])
             try:
-                response = self.llm.complete(
-                    LLMRequest(messages=messages, temperature=0.2, max_tokens=500)
-                )
+                response = self.llm.complete(LLMRequest(messages=messages, temperature=0.2, max_tokens=500))
                 if response.content.strip():
                     return response.content.strip()
             except LLMError:
@@ -66,18 +67,77 @@ class IntentPlanner:
         content = message.casefold()
         wanted = None
         arguments: dict = {}
-        if any(term in content for term in ("publish dashboard", "xuất bản dashboard", "xuất bản báo cáo", "publish report")):
+        profiling_request = _is_profiling_request(content)
+        profiling_target = _profiling_target(message)
+        if (
+            profiling_request
+            and profiling_target
+            and any(term in content for term in ("chạy", "chay", "run", "đánh giá lại", "danh gia lai", "profile"))
+        ):
+            wanted = "fm.run_data_profiling"
+            arguments = profiling_target
+        elif (
+            profiling_request
+            and any(
+                term in content
+                for term in ("nguồn", "nguon", "asset", "bảng nào", "bang nao", "table nào", "table nao")
+            )
+            and any(
+                term in content
+                for term in ("có thể", "co the", "có sẵn", "co san", "danh sách", "danh sach", "liệt kê", "liet ke")
+            )
+        ):
+            wanted = "fm.list_data_profiling_assets"
+        elif profiling_request and not any(
+            term in content
+            for term in (
+                "tạo dashboard",
+                "tao dashboard",
+                "tạo báo cáo",
+                "tao bao cao",
+                "create dashboard",
+                "create report",
+            )
+        ):
+            wanted = "fm.get_data_profiling_overview"
+            arguments = _profiling_overview_arguments(content)
+        elif any(
+            term in content
+            for term in ("publish dashboard", "xuất bản dashboard", "xuất bản báo cáo", "publish report")
+        ):
             wanted = "reports.publish_draft"
             arguments = {"session_id": "__resolve_latest__"}
-        elif any(term in content for term in ("tạo dashboard", "tao dashboard", "tạo báo cáo", "tao bao cao", "create dashboard", "create report")):
+        elif any(
+            term in content
+            for term in (
+                "tạo dashboard",
+                "tao dashboard",
+                "tạo báo cáo",
+                "tao bao cao",
+                "create dashboard",
+                "create report",
+            )
+        ):
             wanted = "reports.create_draft"
             arguments = {"prompt": message}
-        elif any(term in content for term in ("danh sách dashboard", "danh sach dashboard", "dashboard hiện có", "bao cao hien co", "list dashboards", "list reports")):
+        elif any(
+            term in content
+            for term in (
+                "danh sách dashboard",
+                "danh sach dashboard",
+                "dashboard hiện có",
+                "bao cao hien co",
+                "list dashboards",
+                "list reports",
+            )
+        ):
             wanted = "reports.list"
         elif any(term in content for term in ("tạo yêu cầu", "tao yeu cau", "tạo request", "create request")):
             wanted = "fm.create_request"
             arguments = _request_arguments(message)
-        elif any(term in content for term in ("phê duyệt chờ", "phe duyet cho", "chờ duyệt", "cho duyet", "pending approval")):
+        elif any(
+            term in content for term in ("phê duyệt chờ", "phe duyet cho", "chờ duyệt", "cho duyet", "pending approval")
+        ):
             wanted = "fm.get_pending_approvals"
         elif any(term in content for term in ("quá hạn", "qua han")):
             wanted = "fm.get_overdue_requests"
@@ -139,6 +199,10 @@ class IntentPlanner:
             summary = "Đã chuẩn bị tạo bản nháp dashboard. Hãy xác nhận để Titan AI thiết kế và xem trước dữ liệu."
         elif capability.name == "reports.publish_draft":
             summary = "Đã chuẩn bị publish bản nháp dashboard gần nhất. Hãy xác nhận để chạy job publish."
+        elif capability.name == "fm.run_data_profiling":
+            summary = (
+                "Đã chuẩn bị chạy đánh giá dữ liệu cho raw asset đã chỉ rõ. Hãy xác nhận để lưu kết quả profiling."
+            )
         elif requires_confirmation:
             summary = "FM action prepared; confirmation is required before execution."
         else:
@@ -162,9 +226,64 @@ def _safe_arguments(capability: Capability, message: str) -> dict | None:
         return {"prompt": message}
     if capability.name == "reports.publish_draft":
         return {"session_id": "__resolve_latest__"}
+    if capability.name == "fm.get_data_profiling_overview":
+        return _profiling_overview_arguments(message.casefold())
+    if capability.name == "fm.run_data_profiling":
+        return _profiling_target(message)
     if capability.input_schema.get("required"):
         return None
     return {}
+
+
+def _is_profiling_request(content: str) -> bool:
+    """Nhận diện chủ đề chất lượng raw data, không dùng output LLM làm tool input."""
+    terms = (
+        "data profiling",
+        "profiling",
+        "profile dữ liệu",
+        "profile du lieu",
+        "đánh giá dữ liệu",
+        "danh gia du lieu",
+        "chất lượng dữ liệu",
+        "chat luong du lieu",
+        "chất lượng raw",
+        "chat luong raw",
+        "raw data quality",
+        "data quality",
+        "dữ liệu bronze",
+        "du lieu bronze",
+        "bms quality",
+        "spo quality",
+        "raw asset",
+        "bảng raw",
+        "bang raw",
+        "asset bms",
+        "asset spo",
+    )
+    return any(term in content for term in terms)
+
+
+def _profiling_overview_arguments(content: str) -> dict:
+    """Chỉ trích xuất filter layer/thời gian từ mẫu xác định trước."""
+    layer = "gold" if "gold" in content else "silver" if "silver" in content else "bronze"
+    arguments: dict[str, object] = {"layer": layer}
+    month = re.search(r"(?:tháng|thang|month)\s*(1[0-2]|0?[1-9])\b", content)
+    year = re.search(r"(?:năm|nam|year)\s*(20\d{2}|21\d{2}|22\d{2})\b", content)
+    if month:
+        arguments["month"] = int(month.group(1))
+    if year:
+        arguments["year"] = int(year.group(1))
+    if any(term in content for term in ("demo", "mô phỏng", "mo phong", "fixture")):
+        arguments["include_demo"] = True
+    return arguments
+
+
+def _profiling_target(message: str) -> dict | None:
+    """Chỉ nhận target theo dạng connection_id/table; không suy diễn từ LLM."""
+    match = re.search(r"\b([a-z][a-z0-9_]{1,80})\s*/\s*([a-z][a-z0-9_.]{1,120})\b", message.casefold())
+    if not match:
+        return None
+    return {"connection_id": match.group(1), "table": match.group(2)}
 
 
 def _request_arguments(message: str) -> dict:
@@ -182,9 +301,16 @@ def _request_arguments(message: str) -> dict:
     elif any(term in content for term in ("ưu tiên thấp", "thấp", "low")):
         priority = "low"
     title = message.strip()
-    for prefix in ("tạo yêu cầu fm", "tạo yêu cầu", "tao yeu cau fm", "tao yeu cau", "create fm request", "create request"):
+    for prefix in (
+        "tạo yêu cầu fm",
+        "tạo yêu cầu",
+        "tao yeu cau fm",
+        "tao yeu cau",
+        "create fm request",
+        "create request",
+    ):
         if title.casefold().startswith(prefix):
-            title = title[len(prefix):].lstrip(" :,-") or message.strip()
+            title = title[len(prefix) :].lstrip(" :,-") or message.strip()
             break
     return {
         "workflow_definition_id": "__resolve_default__",
@@ -211,6 +337,5 @@ def _normal_chat_fallback(message: str) -> str:
     if any(term in content for term in ("xin chào", "chào", "hello", "hi")):
         return "Xin chào! Tôi có thể hỗ trợ trao đổi thông thường hoặc hướng dẫn các luồng dữ liệu và FM của Titan."
     return (
-        "Tôi có thể hỗ trợ trao đổi thông thường hoặc hướng dẫn cách truy vấn dữ liệu "
-        "và xử lý yêu cầu FM trong Titan."
+        "Tôi có thể hỗ trợ trao đổi thông thường hoặc hướng dẫn cách truy vấn dữ liệu và xử lý yêu cầu FM trong Titan."
     )

@@ -1,5 +1,7 @@
 """Xác thực user context đáng tin cậy do Titan Control Plane chuyển tiếp."""
 
+from __future__ import annotations
+
 import base64
 import hashlib
 import hmac

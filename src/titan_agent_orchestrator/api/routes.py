@@ -2,6 +2,7 @@
 
 from typing import Annotated
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from titan_agent_orchestrator.auth import PrincipalDep
@@ -11,6 +12,7 @@ from titan_agent_orchestrator.models import (
     CreateConversationInput,
     DecisionInput,
     MessageInput,
+    PlanDecisionInput,
     Run,
     RunEvent,
 )
@@ -101,4 +103,33 @@ def decide_run(
     except PermissionError as error:
         raise HTTPException(status_code=403, detail=str(error)) from None
     except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+
+
+@router.post("/runs/{run_id}/plan/decision")
+def decide_plan(
+    run_id: str,
+    body: PlanDecisionInput,
+    principal: PrincipalDep,
+    service: EngineDep,
+) -> Run:
+    """Approve or discard a server-persisted PlannerAgent plan."""
+    run = _run_or_404(run_id, principal, service)
+    try:
+        return service.decide_plan(run, body.decision, body.plan_id, body.plan_version, principal)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from None
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+
+
+@router.post("/runs/{run_id}/replan")
+def replan_run(run_id: str, principal: PrincipalDep, service: EngineDep) -> Run:
+    """Retry a failed plan with a newly generated bounded plan."""
+    run = _run_or_404(run_id, principal, service)
+    try:
+        return service.replan(run, principal)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from None
+    except (ValueError, httpx.HTTPError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from None

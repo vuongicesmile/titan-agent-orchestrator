@@ -33,6 +33,7 @@ class Settings:
     gemini_api_key: str = _env("GEMINI_API_KEY", secret=True)
     gemini_base_url: str = _env("GEMINI_BASE_URL")
     gemini_model: str = _env("GEMINI_MODEL")
+    planner_max_task_retries: int = field(default_factory=lambda: max(0, min(int(os.getenv("PLANNER_MAX_TASK_RETRIES", "2")), 5)))
 
 
 settings = Settings()

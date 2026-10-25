@@ -9,16 +9,42 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterable
+from uuid import uuid4
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field
 
 from titan_agent_orchestrator.llm.exceptions import LLMError
 from titan_agent_orchestrator.llm.models import LLMRequest, RouterDecision, parse_json_object
 from titan_agent_orchestrator.llm.router import ModelRouter
-from titan_agent_orchestrator.models import Capability, Message, Proposal
+from titan_agent_orchestrator.models import Capability, Message, Plan, PlanTask, Proposal
 from titan_agent_orchestrator.prompts.chat import GENERAL_CHAT_SYSTEM_PROMPT
-from titan_agent_orchestrator.prompts.planner import CAPABILITY_ROUTER_SYSTEM_PROMPT
+from titan_agent_orchestrator.prompts.planner import CAPABILITY_ROUTER_SYSTEM_PROMPT, PLANNER_AGENT_SYSTEM_PROMPT
 from titan_agent_orchestrator.settings import Settings, settings
+
+
+class PlanDraftTask(BaseModel):
+    """Strict shape accepted from an LLM before local capability validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    agent: str = Field(min_length=1, max_length=120)
+    capability: str = Field(pattern=r"^[a-z][a-z0-9_.-]{2,100}$")
+    description: str = Field(min_length=1, max_length=1000)
+    arguments: dict = Field(default_factory=dict)
+    depends_on: list[str] = Field(default_factory=list, max_length=32)
+    requires_approval: bool = False
+
+
+class PlanDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    intent: str = Field(min_length=1, max_length=200)
+    tasks: list[PlanDraftTask] = Field(min_length=2, max_length=32)
 
 
 def _hash(capability: str, arguments: dict) -> str:
@@ -26,8 +52,13 @@ def _hash(capability: str, arguments: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-class IntentPlanner:
-    """Chọn capability trong catalog mà không cho LLM thực thi trực tiếp."""
+class PlannerAgent:
+    """Independent planner that delegates work through the existing gateway.
+
+    The agent owns intent/plan decisions only. It never calls MCP, a database,
+    or a specialized agent directly; every task remains a Control Plane
+    capability invocation.
+    """
 
     def __init__(self, runtime_settings: Settings | None = None, client: httpx.Client | None = None) -> None:
         self.settings = runtime_settings or settings
@@ -35,6 +66,62 @@ class IntentPlanner:
 
     def _llm_enabled(self) -> bool:
         return self.llm.enabled
+
+    def plan(self, message: str, catalog: list[Capability]) -> Plan | None:
+        """Build a validated multi-task plan when the request needs one.
+
+        A single-step request intentionally falls through to the mature legacy
+        proposal path, preserving existing API behavior. LLM output is only a
+        candidate; capability, dependency, argument, and approval validation
+        happens locally before a plan can reach the engine.
+        """
+        if not catalog or not _looks_like_multi_step(message):
+            return None
+        draft: dict | None = None
+        if self._llm_enabled():
+            draft = self._plan_with_llm(message, catalog)
+        if draft is None:
+            draft = _fallback_plan(message, catalog)
+        if draft is None:
+            return None
+        try:
+            return _validated_plan(message, draft, catalog)
+        except ValueError:
+            return None
+
+    def _plan_with_llm(self, message: str, catalog: list[Capability]) -> dict | None:
+        safe_catalog = [
+            {
+                "name": capability.name,
+                "agent": capability.agent or _agent_label(capability.name),
+                "description": capability.description,
+                "input_schema": capability.input_schema,
+                "write": capability.write,
+                "requires_approval": capability.requires_confirmation or capability.write,
+            }
+            for capability in catalog
+        ]
+        try:
+            response = self.llm.complete(
+                LLMRequest(
+                    messages=[
+                        {"role": "system", "content": PLANNER_AGENT_SYSTEM_PROMPT},
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                {"request": message, "capabilities": safe_catalog},
+                                ensure_ascii=False,
+                            ),
+                        },
+                    ],
+                    temperature=0,
+                    max_tokens=1600,
+                ),
+                response_model=PlanDraft,
+            )
+            return parse_json_object(response.content)
+        except (LLMError, ValueError, TypeError):
+            return None
 
     def propose(self, message: str, catalog: list[Capability]) -> Proposal | None:
         if not catalog:
@@ -214,6 +301,220 @@ class IntentPlanner:
             proposal_hash=_hash(capability.name, arguments),
             requires_confirmation=requires_confirmation,
         )
+
+
+# Backwards-compatible import used by existing callers and tests.
+IntentPlanner = PlannerAgent
+
+
+def _looks_like_multi_step(message: str) -> bool:
+    content = message.casefold()
+    conjunction = any(token in content for token in (" and ", " rồi ", " sau đó ", " then ", ";"))
+    multi_intent = any(
+        token in content
+        for token in (
+            "detect anomal",
+            "phát hiện bất thường",
+            "phat hien bat thuong",
+            "tạo dashboard",
+            "tao dashboard",
+            "create dashboard",
+            "create a dashboard",
+        )
+    )
+    return conjunction and multi_intent or ("analyze" in content and "dashboard" in content)
+
+
+def _agent_label(capability: str) -> str:
+    """Display-only ownership label for legacy catalogs without `agent`."""
+    namespace = capability.split(".", 1)[0]
+    return {"data": "QAAgent", "reports": "ReportAgent", "fm": "FMAgent"}.get(
+        namespace, f"{namespace.title()}Agent"
+    )
+
+
+def _fallback_plan(message: str, catalog: list[Capability]) -> dict | None:
+    """Conservative local fallback when no LLM is configured or available."""
+    by_name = {capability.name: capability for capability in catalog}
+    tasks: list[dict] = []
+    analysis = next(
+        (by_name[name] for name in ("data.answer_question", "fm.get_data_profiling_overview") if name in by_name),
+        None,
+    )
+    draft = next(
+        (by_name[name] for name in ("reports.create_draft", "reports.create_report") if name in by_name), None
+    )
+    publish = next(
+        (by_name[name] for name in ("reports.publish_draft", "reports.publish") if name in by_name), None
+    )
+    if analysis:
+        tasks.append(
+            {
+                "id": "task_analysis",
+                "agent": analysis.agent or _agent_label(analysis.name),
+                "capability": analysis.name,
+                "description": "Analyze the requested data and identify relevant anomalies.",
+                "arguments": _safe_arguments(analysis, message) or {},
+                "depends_on": [],
+                "requires_approval": False,
+            }
+        )
+    if draft:
+        tasks.append(
+            {
+                "id": "task_draft",
+                "agent": draft.agent or _agent_label(draft.name),
+                "capability": draft.name,
+                "description": "Generate a dashboard specification and preview.",
+                "arguments": _safe_arguments(draft, message) or {},
+                "depends_on": [tasks[-1]["id"]] if tasks else [],
+                "requires_approval": draft.requires_confirmation or draft.write,
+            }
+        )
+    if publish:
+        tasks.append(
+            {
+                "id": "task_publish",
+                "agent": publish.agent or _agent_label(publish.name),
+                "capability": publish.name,
+                "description": "Publish the approved dashboard to the tenant workspace.",
+                "arguments": {"session_id": "$task_draft.session_id"},
+                "depends_on": [tasks[-1]["id"]] if tasks else [],
+                "requires_approval": True,
+            }
+        )
+    if len(tasks) < 2:
+        return None
+    return {
+        "title": "Planned Titan task",
+        "description": "A dependency-aware plan generated from the available capabilities.",
+        "intent": "multi_step_task",
+        "tasks": tasks,
+    }
+
+
+def _validated_plan(message: str, draft: dict, catalog: list[Capability]) -> Plan:
+    candidate = PlanDraft.model_validate(draft)
+    capabilities = {capability.name: capability for capability in catalog}
+    task_ids = {task.id for task in candidate.tasks}
+    if len(task_ids) != len(candidate.tasks):
+        raise ValueError("Plan task ids must be unique")
+    normalized: list[PlanTask] = []
+    for task in candidate.tasks:
+        capability = capabilities.get(task.capability)
+        if capability is None:
+            raise ValueError("Plan selected a capability outside the filtered catalog")
+        if task.id in task.depends_on or any(dependency not in task_ids for dependency in task.depends_on):
+            raise ValueError("Plan contains an invalid dependency")
+        arguments = _validated_arguments(capability, task.arguments, message)
+        if arguments is None:
+            raise ValueError(f"Arguments are not valid for {capability.name}")
+        normalized.append(
+            PlanTask(
+                id=task.id,
+                agent=capability.agent or _agent_label(capability.name),
+                capability=capability.name,
+                description=task.description,
+                arguments=arguments,
+                depends_on=list(dict.fromkeys(task.depends_on)),
+                requires_approval=bool(task.requires_approval or capability.requires_confirmation or capability.write),
+                write=capability.write,
+            )
+        )
+    _assert_acyclic(normalized)
+    canonical = {
+        "title": candidate.title,
+        "description": candidate.description,
+        "intent": candidate.intent,
+        "tasks": [task.model_dump(exclude={"status", "attempts", "result", "error"}) for task in normalized],
+    }
+    plan_hash = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return Plan(
+        id=uuid4().hex,
+        title=candidate.title,
+        description=candidate.description,
+        intent=candidate.intent,
+        status="pending_approval" if any(task.requires_approval for task in normalized) else "approved",
+        tasks=normalized,
+        plan_hash=plan_hash,
+    )
+
+
+def _validated_arguments(capability: Capability, arguments: dict, message: str) -> dict | None:
+    # Known adapters derive sensitive/side-effecting arguments locally. LLM
+    # output may only provide safe references for dependent tasks.
+    safe = _safe_arguments(capability, message)
+    selected = safe if safe is not None else dict(arguments)
+    if capability.name == "reports.publish_draft" and arguments.get("session_id"):
+        selected = {"session_id": arguments["session_id"]}
+    schema = capability.input_schema or {}
+    required = schema.get("required", [])
+    if any(key not in selected for key in required):
+        return None
+    properties = schema.get("properties")
+    if isinstance(properties, dict) and any(key not in properties for key in selected):
+        # A dependent result reference is still an argument, but its key must
+        # be declared by the capability schema.
+        return None
+    if isinstance(properties, dict) and not _matches_schema(selected, properties):
+        return None
+    if not _safe_json(selected):
+        return None
+    return selected
+
+
+def _matches_schema(arguments: dict, properties: dict) -> bool:
+    """Validate the small JSON argument surface before delegation.
+
+    The Control Plane remains authoritative, but rejecting obvious type/key
+    mismatches here prevents an LLM from smuggling arbitrary tool input into a
+    task. Explicit task-result references are resolved later and therefore are
+    accepted for any declared property type.
+    """
+    for key, value in arguments.items():
+        if isinstance(value, str) and value.startswith("$"):
+            continue
+        expected = properties.get(key, {}).get("type") if isinstance(properties.get(key), dict) else None
+        if expected == "string" and not isinstance(value, str):
+            return False
+        if expected == "boolean" and not isinstance(value, bool):
+            return False
+        if expected == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
+            return False
+        if expected == "number" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
+            return False
+        if expected == "array" and not isinstance(value, list):
+            return False
+        if expected == "object" and not isinstance(value, dict):
+            return False
+    return True
+
+
+def _safe_json(value: object, depth: int = 0) -> bool:
+    if depth > 5:
+        return False
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return not isinstance(value, str) or len(value) <= 4000
+    if isinstance(value, list):
+        return len(value) <= 64 and all(_safe_json(item, depth + 1) for item in value)
+    if isinstance(value, dict):
+        return len(value) <= 64 and all(
+            isinstance(key, str) and len(key) <= 120 and _safe_json(item, depth + 1)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _assert_acyclic(tasks: Iterable[PlanTask]) -> None:
+    graph = {task.id: set(task.depends_on) for task in tasks}
+    resolved: set[str] = set()
+    while graph:
+        ready = {task_id for task_id, dependencies in graph.items() if dependencies <= resolved}
+        if not ready:
+            raise ValueError("Plan dependencies must be acyclic")
+        resolved.update(ready)
+        for task_id in ready:
+            graph.pop(task_id)
 
 
 def _safe_arguments(capability: Capability, message: str) -> dict | None:

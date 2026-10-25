@@ -11,6 +11,7 @@ from uuid import uuid4
 from titan_agent_orchestrator.models import (
     Conversation,
     Message,
+    Plan,
     Proposal,
     Run,
     RunEvent,
@@ -20,6 +21,9 @@ from titan_agent_orchestrator.models import (
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+_UNSET = object()
 
 
 class SQLiteRepository:
@@ -49,8 +53,9 @@ class SQLiteRepository:
                 );
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, org_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL, status TEXT NOT NULL, proposal TEXT, result TEXT,
-                    error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                    user_id TEXT NOT NULL, status TEXT NOT NULL, proposal TEXT, plan TEXT, result TEXT,
+                    error TEXT, response_type TEXT NOT NULL DEFAULT 'run',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS run_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, kind TEXT NOT NULL,
@@ -62,6 +67,14 @@ class SQLiteRepository:
                 CREATE INDEX IF NOT EXISTS idx_events_run ON run_events(run_id, id);
                 """
             )
+            # The repository intentionally has no migration dependency. Keep
+            # existing local databases usable when the PlannerAgent fields are
+            # introduced after a previous checkout was run.
+            columns = {row[1] for row in database.execute("PRAGMA table_info(runs)").fetchall()}
+            if "plan" not in columns:
+                database.execute("ALTER TABLE runs ADD COLUMN plan TEXT")
+            if "response_type" not in columns:
+                database.execute("ALTER TABLE runs ADD COLUMN response_type TEXT NOT NULL DEFAULT 'run'")
 
     @staticmethod
     def _conversation(row: sqlite3.Row) -> Conversation:
@@ -75,7 +88,9 @@ class SQLiteRepository:
     def _run(row: sqlite3.Row) -> Run:
         doc = dict(row)
         doc["proposal"] = json.loads(doc["proposal"]) if doc["proposal"] else None
+        doc["plan"] = json.loads(doc["plan"]) if doc.get("plan") else None
         doc["result"] = json.loads(doc["result"]) if doc["result"] else None
+        doc["response_type"] = doc.get("response_type") or "run"
         return Run(**doc)
 
     @staticmethod
@@ -138,7 +153,9 @@ class SQLiteRepository:
         now, identity = _now(), uuid4().hex
         with self._connection() as database:
             database.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)",
+                "INSERT INTO runs (id, conversation_id, org_id, user_id, status, proposal, plan, result, "
+                "error, response_type, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'run', ?, ?)",
                 (
                     identity,
                     conversation_id,
@@ -176,23 +193,76 @@ class SQLiteRepository:
         identity: str,
         status: RunStatus,
         *,
-        proposal: Proposal | None = None,
-        result: dict | None = None,
-        error: str | None = None,
+        proposal: Proposal | None | object = _UNSET,
+        plan: Plan | None | object = _UNSET,
+        result: dict | None | object = _UNSET,
+        error: str | None | object = _UNSET,
+        response_type: str | object = _UNSET,
     ) -> None:
         now = _now().isoformat()
         with self._connection() as database:
+            row = database.execute(
+                "SELECT proposal, plan, result, error, response_type FROM runs WHERE id=?", (identity,)
+            ).fetchone()
+            if row is None:
+                raise KeyError("Run was not found")
+            current = dict(row)
+            selected_proposal = current["proposal"] if proposal is _UNSET else (
+                json.dumps(proposal.model_dump(mode="json")) if proposal is not None else None
+            )
+            selected_plan = current["plan"] if plan is _UNSET else (
+                json.dumps(plan.model_dump(mode="json")) if plan is not None else None
+            )
+            selected_result = current["result"] if result is _UNSET else (
+                json.dumps(result) if result is not None else None
+            )
+            selected_error = current["error"] if error is _UNSET else error
+            selected_response_type = current["response_type"] if response_type is _UNSET else response_type
             database.execute(
-                "UPDATE runs SET status=?, proposal=?, result=?, error=?, updated_at=? WHERE id=?",
+                "UPDATE runs SET status=?, proposal=?, plan=?, result=?, error=?, response_type=?, "
+                "updated_at=? WHERE id=?",
                 (
                     status,
-                    json.dumps(proposal.model_dump(mode="json")) if proposal else None,
-                    json.dumps(result) if result is not None else None,
-                    error,
+                    selected_proposal,
+                    selected_plan,
+                    selected_result,
+                    selected_error,
+                    selected_response_type,
                     now,
                     identity,
                 ),
             )
+
+    def claim_plan_decision(
+        self,
+        identity: str,
+        org_id: str,
+        user_id: str,
+        plan_id: str,
+        plan_version: int,
+        target_status: str,
+        response_type: str = "run",
+    ) -> bool:
+        """Atomically claim a pending plan so repeated clicks execute once."""
+        with self._connection() as database:
+            cursor = database.execute(
+                "UPDATE runs SET status=?, plan=json_set(plan, '$.status', ?), response_type=?, updated_at=? "
+                "WHERE id=? AND org_id=? AND user_id=? AND status='waiting_confirmation' "
+                "AND json_extract(plan, '$.id')=? AND CAST(json_extract(plan, '$.version') AS INTEGER)=? "
+                "AND json_extract(plan, '$.status')='pending_approval'",
+                (
+                    "running" if target_status == "approved" else "cancelled",
+                    target_status,
+                    response_type,
+                    _now().isoformat(),
+                    identity,
+                    org_id,
+                    user_id,
+                    plan_id,
+                    plan_version,
+                ),
+            )
+            return cursor.rowcount == 1
 
     def add_event(self, run_id: str, kind: str, message: str, data: dict | None = None) -> RunEvent:
         now = _now()

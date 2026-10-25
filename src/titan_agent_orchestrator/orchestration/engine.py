@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 
 from titan_agent_orchestrator.capabilities.contracts import CapabilityGateway
-from titan_agent_orchestrator.models import Principal, Run
+from titan_agent_orchestrator.models import Plan, PlanTask, Principal, Run
 from titan_agent_orchestrator.orchestration.planner import IntentPlanner, _hash
 from titan_agent_orchestrator.orchestration.state import transition
 from titan_agent_orchestrator.persistence.sqlite import SQLiteRepository
@@ -16,15 +18,27 @@ class OrchestrationEngine:
         self.repository = repository
         self.gateway = gateway
         self.planner = IntentPlanner()
+        self.max_task_retries = getattr(getattr(self.planner, "settings", None), "planner_max_task_retries", 2)
 
     def start(self, conversation_id: str, message: str, principal: Principal) -> Run:
         run = self.repository.create_run(conversation_id, principal.org_id, principal.user_id)
         self.repository.add_event(run.id, "run_started", "Request processing started.")
         self.repository.update_run(run.id, transition(run.status, "running"))
         try:
-            proposal = self.planner.propose(message, self.gateway.catalog(principal))
+            catalog = self.gateway.catalog(principal)
         except httpx.HTTPError:
             return self._fail(run, "Unable to load the capability catalog from Titan Control Plane.")
+        plan = self.planner.plan(message, catalog) if hasattr(self.planner, "plan") else None
+        if plan is not None:
+            self.repository.update_run(run.id, "running", plan=plan)
+            self.repository.add_event(
+                run.id,
+                "plan_generated",
+                "PlannerAgent generated a dependency-aware plan.",
+                {"plan": plan.model_dump(mode="json")},
+            )
+            return self._execute_plan(run, plan, principal, approval_granted=plan.status == "approved")
+        proposal = self.planner.propose(message, catalog)
         if proposal is None:
             if any(term in message.casefold() for term in ("tạo yêu cầu", "tạo request", "create request")):
                 response = (
@@ -68,6 +82,200 @@ class OrchestrationEngine:
             self.repository.add_message(conversation_id, "assistant", proposal.summary)
             return self.repository.get_run(run.id, principal.org_id, principal.user_id)
         return self._execute(run, proposal, principal)
+
+    def decide_plan(self, run: Run, decision: str, plan_id: str, plan_version: int, principal: Principal) -> Run:
+        """Approve/discard a persisted plan with an atomic one-click claim."""
+        plan = run.plan
+        if plan is None:
+            raise ValueError("Run is not waiting for a plan decision")
+        if plan.id != plan_id or plan.version != plan_version:
+            raise ValueError("Decision does not match the current plan")
+        if run.status != "waiting_confirmation" or plan.status != "pending_approval":
+            # Repeated clicks after the atomic claim are safe and idempotent.
+            if decision == "approve" and plan.status in {"approved", "running", "completed"}:
+                return run
+            if decision == "discard" and plan.status == "discarded":
+                return run
+            raise ValueError("Run is not waiting for a plan decision")
+        if decision == "approve" and "agent:execute" not in principal.permissions:
+            raise PermissionError("Missing agent:execute permission")
+        claimed = self.repository.claim_plan_decision(
+            run.id,
+            principal.org_id,
+            principal.user_id,
+            plan_id,
+            plan_version,
+            "approved" if decision == "approve" else "discarded",
+            "run" if decision == "approve" else "result",
+        )
+        if not claimed:
+            # A repeated click is idempotent: return the already claimed result.
+            current = self.repository.get_run(run.id, principal.org_id, principal.user_id)
+            if current.plan and current.plan.status in {"approved", "running", "completed", "failed", "discarded"}:
+                return current
+            raise ValueError("Plan decision was already claimed")
+        current = self.repository.get_run(run.id, principal.org_id, principal.user_id)
+        if decision == "discard":
+            self.repository.add_event(run.id, "cancelled", "The user discarded the PlannerAgent plan.")
+            self.repository.add_message(
+                run.conversation_id,
+                "assistant",
+                "Plan discarded; no protected action was called.",
+            )
+            return self.repository.get_run(run.id, principal.org_id, principal.user_id)
+        self.repository.add_event(run.id, "progress", "Plan approved; resuming delegated tasks.")
+        approved_plan = current.plan.model_copy(update={"status": "approved"}) if current.plan else None
+        if approved_plan is None:
+            raise ValueError("Approved plan is missing")
+        return self._execute_plan(current, approved_plan, principal, approval_granted=True)
+
+    def replan(self, run: Run, principal: Principal) -> Run:
+        """Generate a bounded replacement plan after failure, preserving successes."""
+        if run.plan is None or run.status != "failed":
+            raise ValueError("Only a failed PlannerAgent run can be replanned")
+        history = self.repository.list_messages(run.conversation_id)
+        request = next((item.content for item in reversed(history) if item.role == "user"), "")
+        if not request:
+            raise ValueError("The original request is unavailable")
+        catalog = self.gateway.catalog(principal)
+        new_plan = self.planner.plan(request, catalog) if hasattr(self.planner, "plan") else None
+        if new_plan is None:
+            raise ValueError("PlannerAgent could not produce a replacement plan")
+        completed = {
+            task.id: task
+            for task in run.plan.tasks
+            if task.status == "completed" and task.result is not None
+        }
+        tasks = [
+            task.model_copy(update={"status": "completed", "result": completed[task.id].result})
+            if task.id in completed and task.capability == completed[task.id].capability
+            else task
+            for task in new_plan.tasks
+        ]
+        new_plan = new_plan.model_copy(
+            update={"id": run.plan.id, "version": run.plan.version + 1, "tasks": tasks}
+        )
+        self.repository.update_run(run.id, "running", plan=new_plan, error=None, response_type="run")
+        self.repository.add_event(
+            run.id,
+            "replanned",
+            "PlannerAgent generated a replacement plan.",
+            {"plan": new_plan.model_dump(mode="json")},
+        )
+        return self._execute_plan(
+            self.repository.get_run(run.id, principal.org_id, principal.user_id),
+            new_plan,
+            principal,
+            approval_granted=new_plan.status == "approved",
+        )
+
+    def _execute_plan(self, run: Run, plan: Plan, principal: Principal, *, approval_granted: bool) -> Run:
+        tasks = [task.model_copy(deep=True) for task in plan.tasks]
+        plan = plan.model_copy(update={"status": "running"})
+        self.repository.update_run(run.id, "running", plan=plan, response_type="run")
+        results = {task.id: task.result for task in tasks if task.status == "completed" and task.result is not None}
+        max_retries = self.max_task_retries
+        while True:
+            progressed = False
+            for index, task in enumerate(tasks):
+                if task.status == "completed":
+                    continue
+                dependencies = [
+                    next((item for item in tasks if item.id == dependency), None)
+                    for dependency in task.depends_on
+                ]
+                if any(item is None or item.status in {"failed", "skipped"} for item in dependencies):
+                    task = task.model_copy(update={"status": "skipped", "error": "A dependency failed."})
+                    tasks[index] = task
+                    continue
+                if any(item is None or item.status != "completed" for item in dependencies):
+                    continue
+                if task.requires_approval and not approval_granted:
+                    task = task.model_copy(update={"status": "waiting_approval"})
+                    tasks[index] = task
+                    pending = plan.model_copy(update={"status": "pending_approval", "tasks": tasks})
+                    self.repository.update_run(
+                        run.id,
+                        "waiting_confirmation",
+                        plan=pending,
+                        response_type="approval_required",
+                    )
+                    self.repository.add_event(
+                        run.id,
+                        "approval_required",
+                        "Review the plan before protected actions run.",
+                        {"plan": pending.model_dump(mode="json")},
+                    )
+                    self.repository.add_message(
+                        run.conversation_id,
+                        "assistant",
+                        f"Please review plan: {pending.title}",
+                    )
+                    return self.repository.get_run(run.id, principal.org_id, principal.user_id)
+                task = task.model_copy(update={"status": "running", "attempts": task.attempts + 1, "error": None})
+                tasks[index] = task
+                self.repository.update_run(run.id, "running", plan=plan.model_copy(update={"tasks": tasks}))
+                self.repository.add_event(
+                    run.id,
+                    "task_started",
+                    f"Delegating {task.id} to {task.agent}.",
+                    {"task": task.model_dump(mode="json")},
+                )
+                try:
+                    arguments = _resolve_task_arguments(task.arguments, results)
+                    execution = self.gateway.execute(
+                        principal,
+                        run.id,
+                        f"agent-plan:{run.id}:{plan.id}:{plan.version}:{task.id}",
+                        task.capability,
+                        arguments,
+                    )
+                except (httpx.HTTPError, ValueError) as exc:
+                    transient = isinstance(exc, httpx.HTTPError) and not isinstance(exc, httpx.HTTPStatusError)
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        transient = exc.response.status_code >= 500
+                    if transient and not task.write and task.attempts <= max_retries:
+                        self.repository.add_event(run.id, "progress", f"Retrying {task.id} after a transient failure.")
+                        task = task.model_copy(update={"status": "pending"})
+                        tasks[index] = task
+                        continue
+                    failed = task.model_copy(update={"status": "failed", "error": _plan_error(task.capability, exc)})
+                    tasks[index] = failed
+                    failed_plan = plan.model_copy(update={"status": "failed", "tasks": tasks})
+                    return self._fail_plan(run, failed_plan, failed.error or "Delegated task failed.")
+                task_result = {**execution.result, "message": _humanize_result(task.capability, execution.result)}
+                task = task.model_copy(update={"status": "completed", "result": task_result})
+                tasks[index] = task
+                results[task.id] = task_result
+                plan = plan.model_copy(update={"tasks": tasks})
+                self.repository.update_run(run.id, "running", plan=plan)
+                self.repository.add_event(run.id, "task_finished", f"{task.id} completed.", {"task_id": task.id})
+                progressed = True
+            if all(task.status == "completed" for task in tasks):
+                final_plan = plan.model_copy(update={"status": "completed", "tasks": tasks})
+                aggregate = {
+                    "plan_id": final_plan.id,
+                    "tasks": {task.id: task.result for task in tasks},
+                    "message": "Plan completed successfully.",
+                }
+                self.repository.update_run(
+                    run.id,
+                    "completed",
+                    plan=final_plan,
+                    result=aggregate,
+                    response_type="result",
+                )
+                self.repository.add_message(run.conversation_id, "assistant", aggregate["message"])
+                return self.repository.get_run(run.id, principal.org_id, principal.user_id)
+            if not progressed and not any(task.status == "pending" for task in tasks):
+                failed_plan = plan.model_copy(update={"status": "failed", "tasks": tasks})
+                return self._fail_plan(run, failed_plan, "Plan dependencies could not be satisfied.")
+
+    def _fail_plan(self, run: Run, plan: Plan, message: str) -> Run:
+        self.repository.update_run(run.id, "failed", plan=plan, error=message, response_type="result")
+        self.repository.add_event(run.id, "failed", message, {"plan": plan.model_dump(mode="json")})
+        self.repository.add_message(run.conversation_id, "assistant", message)
+        return self.repository.get_run(run.id, run.org_id, run.user_id)
 
     def decide(self, run: Run, decision: str, proposal_hash: str, principal: Principal) -> Run:
         if run.status != "waiting_confirmation" or run.proposal is None:
@@ -371,6 +579,36 @@ def _capability_failure_message(capability: str, error: httpx.HTTPStatusError) -
             "The action was not retried automatically; verify the result before trying again."
         )
     return f"Control Plane rejected {capability} (HTTP {status}). Review permissions or the request and try again."
+
+
+def _resolve_task_arguments(arguments: dict[str, Any], results: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
+    """Resolve only explicit `$task_id.field` references from completed tasks."""
+    def resolve(value: Any) -> Any:
+        if isinstance(value, str) and value.startswith("$"):
+            path = value[1:].split(".")
+            result = results.get(path[0])
+            if result is None:
+                raise ValueError(f"Task result reference {value} is unavailable")
+            for part in path[1:]:
+                if not isinstance(result, dict) or part not in result:
+                    raise ValueError(f"Task result reference {value} is unavailable")
+                result = result[part]
+            return result
+        if isinstance(value, list):
+            return [resolve(item) for item in value]
+        if isinstance(value, dict):
+            return {key: resolve(item) for key, item in value.items()}
+        return value
+
+    return resolve(arguments)
+
+
+def _plan_error(capability: str, error: Exception) -> str:
+    if isinstance(error, httpx.HTTPStatusError):
+        return _capability_failure_message(capability, error)
+    if isinstance(error, httpx.HTTPError):
+        return f"Capability {capability} did not respond; completed task results were preserved."
+    return f"Capability {capability} could not be executed: {error}"
 
 
 def _format_requests(prefix: str, items: list[dict]) -> str:

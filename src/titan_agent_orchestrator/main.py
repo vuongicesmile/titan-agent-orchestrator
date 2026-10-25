@@ -1,5 +1,7 @@
 """Điểm khởi tạo ứng dụng FastAPI."""
 
+from __future__ import annotations
+
 from fastapi import FastAPI
 
 from titan_agent_orchestrator.adapters.titan import TitanCapabilityGateway

@@ -140,7 +140,7 @@ def test_data_question_creates_durable_run(monkeypatch, tmp_path):
     assert run["result"]["answer"] == "Question received"
 
     events = client.get(f"/v1/runs/{run['id']}/events", headers=headers).json()
-    assert [event["kind"] for event in events] == ["run_started", "tool_started", "tool_finished"]
+    assert [event["kind"] for event in events] == ["run_started", "progress", "progress", "tool_started", "tool_finished"]
 
 
 def test_config_exposes_router_order_without_credentials(monkeypatch, tmp_path):
@@ -195,7 +195,8 @@ def test_normal_chat_uses_llm_when_no_capability_is_selected(monkeypatch, tmp_pa
     assert run["status"] == "completed"
     assert run["result"] == {"message": "Hello! How can I help with Titan Data?"}
     events = client.get(f"/v1/runs/{run['id']}/events", headers=headers).json()
-    assert [event["kind"] for event in events] == ["run_started", "progress"]
+    assert [event["kind"] for event in events] == ["run_started", "progress", "progress", "progress", "progress"]
+    assert events[-2]["message"] == "Generating a conversation response."
 
 
 def test_profiling_overview_is_humanized_without_raw_tool_payload():

@@ -22,6 +22,7 @@ class Settings:
     llm_api_key: str = _env("LLM_API_KEY", secret=True)
     llm_model: str = _env("LLM_MODEL")
     llm_timeout_s: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT_S", "30")))
+    capability_timeout_s: float = field(default_factory=lambda: float(os.getenv("TITAN_CAPABILITY_TIMEOUT_S", "180")))
     llm_provider: str = _env("LLM_PROVIDER", "groq")
     llm_fallback_provider: str = _env("LLM_FALLBACK_PROVIDER", "zai")
     groq_api_key: str = _env("GROQ_API_KEY", secret=True)

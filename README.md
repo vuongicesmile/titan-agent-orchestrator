@@ -110,6 +110,17 @@ cho distro dùng để build.
 
 ## API flow
 
+Portal có thể gửi message với `background: true` để nhận ngay run ở trạng
+thái queued, sau đó đọc `/v1/runs/{id}` và `/events`. Mặc định vẫn chạy đồng
+bộ để tương thích client cũ. Các endpoint quyết định giữ nguyên xác nhận,
+không tự retry tool ghi; UI đọc tiến trình song song khi HTTP xác nhận đang
+chờ. Background task hiện nằm trong process, chưa phải hàng đợi bền vững:
+không restart khi có tool ghi chạy, không tự replay task sau restart.
+
+`TITAN_CAPABILITY_TIMEOUT_S=180` tăng ngân sách chờ tool; kết nối vẫn 5 giây,
+catalog 20 giây. Proxy Control Plane dùng `TITAN_AGENT_PROXY_TIMEOUT_S=300`.
+Progress gồm các bước thực thi thật, không chứa suy luận nội bộ hoặc secret.
+
 1. Control Plane tạo conversation với context user/tenant đã ký, có hạn dùng.
 2. Gửi message tạo một run và event timeline.
 3. Run có hành động ghi chuyển sang `waiting_confirmation`.

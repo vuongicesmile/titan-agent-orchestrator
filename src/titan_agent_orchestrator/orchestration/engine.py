@@ -21,13 +21,24 @@ class OrchestrationEngine:
         self.max_task_retries = getattr(getattr(self.planner, "settings", None), "planner_max_task_retries", 2)
 
     def start(self, conversation_id: str, message: str, principal: Principal) -> Run:
+        return self.execute_prepared(self.prepare(conversation_id, principal), message, principal)
+
+    def prepare(self, conversation_id: str, principal: Principal) -> Run:
+        """Lưu receipt trước khi chạy để UI có thể theo dõi đúng run ngay lập tức."""
         run = self.repository.create_run(conversation_id, principal.org_id, principal.user_id)
         self.repository.add_event(run.id, "run_started", "Request processing started.")
+        return run
+
+    def execute_prepared(self, run: Run, message: str, principal: Principal) -> Run:
+        """Dùng chung luồng thực thi cho HTTP đồng bộ và tác vụ nền trong process."""
+        conversation_id = run.conversation_id
         self.repository.update_run(run.id, transition(run.status, "running"))
+        self.repository.add_event(run.id, "progress", "Loading available capabilities.")
         try:
             catalog = self.gateway.catalog(principal)
         except httpx.HTTPError:
             return self._fail(run, "Unable to load the capability catalog from Titan Control Plane.")
+        self.repository.add_event(run.id, "progress", "Selecting a capability or execution plan.")
         plan = self.planner.plan(message, catalog) if hasattr(self.planner, "plan") else None
         if plan is not None:
             self.repository.update_run(run.id, "running", plan=plan)
@@ -46,6 +57,7 @@ class OrchestrationEngine:
                     "supporting evidence or related equipment."
                 )
             else:
+                self.repository.add_event(run.id, "progress", "Generating a conversation response.")
                 response = self.planner.answer_normal_chat(self.repository.list_messages(conversation_id))
             self.repository.add_message(conversation_id, "assistant", response)
             self.repository.update_run(run.id, "completed", result={"message": response})

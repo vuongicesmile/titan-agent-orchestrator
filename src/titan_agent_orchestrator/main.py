@@ -22,6 +22,7 @@ def create_app(
         or TitanCapabilityGateway(
             settings.titan_control_plane_url,
             settings.titan_capability_gateway_token,
+            timeout_s=settings.capability_timeout_s,
         ),
     )
     app.include_router(router)

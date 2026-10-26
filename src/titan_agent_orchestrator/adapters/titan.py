@@ -8,10 +8,12 @@ from titan_agent_orchestrator.models import Capability, CapabilityExecution, Pri
 
 
 class TitanCapabilityGateway:
-    def __init__(self, base_url: str, service_token: str, client: httpx.Client | None = None) -> None:
+    def __init__(self, base_url: str, service_token: str, client: httpx.Client | None = None,
+                 timeout_s: float = 180) -> None:
         self.base_url = base_url.rstrip("/")
         self.service_token = service_token
-        self.client = client or httpx.Client(base_url=self.base_url, timeout=25, trust_env=False)
+        self.timeout = httpx.Timeout(timeout_s, connect=5, pool=5)
+        self.client = client or httpx.Client(base_url=self.base_url, timeout=self.timeout, trust_env=False)
 
     def _headers(self, principal: Principal) -> dict[str, str]:
         headers = {
@@ -24,7 +26,7 @@ class TitanCapabilityGateway:
         return headers
 
     def catalog(self, principal: Principal) -> list[Capability]:
-        response = self.client.get("/api/internal/agent/capabilities", headers=self._headers(principal))
+        response = self.client.get("/api/internal/agent/capabilities", headers=self._headers(principal), timeout=20)
         response.raise_for_status()
         return [Capability.model_validate(item) for item in response.json()]
 
@@ -40,6 +42,7 @@ class TitanCapabilityGateway:
             f"/api/internal/agent/capabilities/{capability}/execute",
             headers={**self._headers(principal), "Idempotency-Key": idempotency_key},
             json={"run_id": run_id, "arguments": arguments},
+            timeout=self.timeout,
         )
         response.raise_for_status()
         return CapabilityExecution(capability=capability, arguments=arguments, result=response.json())

@@ -3,7 +3,7 @@
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from titan_agent_orchestrator.auth import PrincipalDep
 from titan_agent_orchestrator.llm.models import ProviderStatus
@@ -13,6 +13,7 @@ from titan_agent_orchestrator.models import (
     DecisionInput,
     MessageInput,
     PlanDecisionInput,
+    Principal,
     Run,
     RunEvent,
 )
@@ -73,10 +74,23 @@ def send_message(
     body: MessageInput,
     principal: PrincipalDep,
     service: EngineDep,
+    background_tasks: BackgroundTasks,
 ) -> Run:
     _conversation_or_404(conversation_id, principal, service)
     service.repository.add_message(conversation_id, "user", body.content.strip())
+    if body.background:
+        run = service.prepare(conversation_id, principal)
+        background_tasks.add_task(_execute_background, service, run, body.content.strip(), principal)
+        return run
     return service.start(conversation_id, body.content.strip(), principal)
+
+
+def _execute_background(service: OrchestrationEngine, run: Run, content: str, principal: Principal) -> None:
+    """Lưu lỗi đã lọc nếu tác vụ nền lỗi; tuyệt đối không tự phát lại tool ghi."""
+    try:
+        service.execute_prepared(run, content, principal)
+    except Exception:
+        service._fail(run, "Background execution failed; verify the run before starting another action.")
 
 
 @router.get("/runs/{run_id}")

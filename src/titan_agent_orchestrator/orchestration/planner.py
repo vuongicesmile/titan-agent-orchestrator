@@ -232,7 +232,10 @@ class PlannerAgent:
             term in content for term in ("mở", "mo", "danh sách", "danh sach", "gần đây", "gan day")
         ):
             wanted = "fm.list_requests"
-        elif any(term in content for term in ("bao nhiêu", "xu hướng", "xu huong", "dữ liệu", "du lieu")):
+        elif any(term in content for term in ("bao nhiêu", "bao nhieu", "xu hướng", "xu huong", "dữ liệu", "du lieu")) or (
+            any(term in content for term in ("tòa nhà", "toa nha", "thiết bị", "thiet bi", "building", "equipment"))
+            and any(term in content for term in ("thông tin", "thong tin", "chi tiết", "chi tiet", "information", "details", "how many"))
+        ):
             wanted = "data.answer_question"
             arguments = {"question": message}
         capability = next((item for item in catalog if item.name == wanted), None)

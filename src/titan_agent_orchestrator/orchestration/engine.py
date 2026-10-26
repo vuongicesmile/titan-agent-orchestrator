@@ -39,6 +39,26 @@ class OrchestrationEngine:
         except httpx.HTTPError:
             return self._fail(run, "Unable to load the capability catalog from Titan Control Plane.")
         self.repository.add_event(run.id, "progress", "Selecting a capability or execution plan.")
+        from titan_agent_orchestrator.orchestration.dashboard import dashboard_route
+
+        previous_dashboard = None
+        previous_capability = None
+        for previous in reversed(self.repository.list_runs(conversation_id, principal.org_id, principal.user_id)):
+            if previous.status == "completed" and previous.proposal and previous.proposal.capability in {"fm.get_bms_dashboard", "fm.get_energy_comparison"}:
+                previous_dashboard = _first_result(previous.result or {})
+                previous_capability = previous.proposal.capability
+                break
+        route = dashboard_route(message, previous_capability, previous_dashboard)
+        dashboard_capability = next((item for item in catalog if route and item.name == route[0]), None)
+        dashboard_filters = route[1] if route and dashboard_capability else None
+        if dashboard_filters is not None:
+            proposal = self.planner._proposal(dashboard_capability, dashboard_filters)
+            if proposal.requires_confirmation:
+                self.repository.update_run(run.id, "waiting_confirmation", proposal=proposal)
+                self.repository.add_event(run.id, "proposal", proposal.summary, {"proposal": proposal.model_dump(mode="json")})
+                self.repository.add_message(conversation_id, "assistant", proposal.summary)
+                return self.repository.get_run(run.id, principal.org_id, principal.user_id)
+            return self._execute(run, proposal, principal)
         plan = self.planner.plan(message, catalog) if hasattr(self.planner, "plan") else None
         if plan is not None:
             self.repository.update_run(run.id, "running", plan=plan)
@@ -415,6 +435,9 @@ def _items_from_result(result: dict) -> list[dict]:
 
 def _humanize_result(capability: str, result: dict) -> str:
     """Chuyển kết quả tool thành câu trả lời người dùng đọc được; raw chỉ nằm trong trace."""
+    if capability in {"fm.get_bms_dashboard", "fm.get_energy_comparison"}:
+        dashboard = _first_result(result) or {}
+        return dashboard.get("message", "Đã cập nhật bộ lọc dashboard BMS.")
     if capability == "data.answer_question":
         answer = result.get("answer")
         return (

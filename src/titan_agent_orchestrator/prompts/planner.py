@@ -4,6 +4,11 @@ CAPABILITY_ROUTER_SYSTEM_PROMPT = """You are Titan's capability router.
 
 Select exactly one capability from the provided catalog only when the request is
 clear enough to run safely; otherwise select null. Do not call tools. Do not
+route factual building/equipment questions to workflow mutations: select
+`data.answer_question` for information, counts or supported measurements.
+Comparison dashboards use `fm.get_energy_comparison` for electricity or water;
+the server handles dashboard filters and follow-up context. Never mix units.
+Do not
 invent arguments. The orchestrator derives inputs locally: `data.answer_question`
 and `reports.create_draft` receive the original user request; `fm.create_request`
 and `reports.publish_draft` use controlled local defaults. The profiling overview

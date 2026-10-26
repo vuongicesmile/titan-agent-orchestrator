@@ -65,3 +65,15 @@ def test_water_comparison_and_followup_grouping():
 
 def test_followup_without_dashboard_context_does_not_open_overview():
     assert dashboard_route("đổi tòa nhà: Building A", None, None) is None
+
+
+def test_qa_context_inherits_only_explicit_reference():
+    from titan_agent_orchestrator.orchestration.dashboard import question_with_dashboard_context
+    previous = {'filters': {'building': 'Building B', 'equipment': 'demo:MAIN-B', 'token': 'not-allowed'}}
+    question = question_with_dashboard_context('Tòa nhà đó có bao nhiêu thiết bị?', previous)
+    assert 'Building B' in question
+    assert 'demo:MAIN-B' not in question
+    assert 'token' not in question
+    assert 'demo:MAIN-B' in question_with_dashboard_context('Thông tin thiết bị đó?', previous)
+    assert question_with_dashboard_context('Tòa nhà Building A có bao nhiêu thiết bị?', previous) == 'Tòa nhà Building A có bao nhiêu thiết bị?'
+    assert question_with_dashboard_context('Tòa nhà đó?', None) == 'Tòa nhà đó?'

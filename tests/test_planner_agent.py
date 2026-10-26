@@ -77,6 +77,26 @@ def test_planner_generates_valid_dependency_aware_plan_without_hardcoded_executi
     assert plan.tasks[2].arguments == {"session_id": "$task_draft.session_id"}
 
 
+def test_qa_followup_executes_with_dashboard_context_and_matching_hash(tmp_path, monkeypatch):
+    from titan_agent_orchestrator.orchestration.planner import _hash
+
+    gateway = Gateway()
+    repository = SQLiteRepository(f"sqlite:///{tmp_path / 'qa_context.db'}")
+    engine = OrchestrationEngine(repository, gateway)
+    conversation = repository.create_conversation('demo', 'user-1', 'QA context')
+    previous = repository.create_run(conversation.id, 'demo', 'user-1')
+    proposal = engine.planner._proposal(Capability(name='fm.get_bms_dashboard', description='Overview', input_schema={}), {})
+    repository.update_run(previous.id, 'completed', proposal=proposal, result={'filters': {'building': 'Building A'}})
+    question = 'Tòa nhà đó có bao nhiêu thiết bị?'
+    monkeypatch.setattr(engine.planner, 'plan', lambda *_args: None)
+    monkeypatch.setattr(engine.planner, 'propose', lambda *_args: engine.planner._proposal(catalog()[0], {'question': question}))
+    run = engine.start(conversation.id, question, principal())
+    assert run.status == 'completed'
+    assert gateway.calls[0][0] == 'data.answer_question'
+    assert 'Building A' in gateway.calls[0][1]['question']
+    assert run.proposal.proposal_hash == _hash('data.answer_question', gateway.calls[0][1])
+
+
 def test_plan_validation_rejects_unknown_capability_and_cycle():
     draft = {
         "title": "Bad plan",

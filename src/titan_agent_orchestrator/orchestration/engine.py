@@ -39,7 +39,7 @@ class OrchestrationEngine:
         except httpx.HTTPError:
             return self._fail(run, "Unable to load the capability catalog from Titan Control Plane.")
         self.repository.add_event(run.id, "progress", "Selecting a capability or execution plan.")
-        from titan_agent_orchestrator.orchestration.dashboard import dashboard_route
+        from titan_agent_orchestrator.orchestration.dashboard import dashboard_route, question_with_dashboard_context
 
         previous_dashboard = None
         previous_capability = None
@@ -83,6 +83,17 @@ class OrchestrationEngine:
             self.repository.update_run(run.id, "completed", result={"message": response})
             self.repository.add_event(run.id, "progress", "General conversation response generated.")
             return self.repository.get_run(run.id, principal.org_id, principal.user_id)
+        if proposal.capability == "data.answer_question":
+            arguments = dict(proposal.arguments)
+            question = arguments.get('question')
+            if isinstance(question, str):
+                contextual = question_with_dashboard_context(question, previous_dashboard)
+                if contextual != question:
+                    arguments['question'] = contextual
+                    proposal = proposal.model_copy(update={
+                        'arguments': arguments,
+                        'proposal_hash': _hash(proposal.capability, arguments),
+                    })
         if proposal.capability == "fm.create_request":
             prepared = self._prepare_request(proposal, principal, run)
             if prepared is None:

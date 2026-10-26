@@ -2,6 +2,27 @@
 
 import re
 import unicodedata
+import json
+
+
+def question_with_dashboard_context(question: str, previous: dict | None) -> str:
+    """Chỉ kế thừa đối tượng khi người dùng trỏ rõ về dashboard đã xem."""
+    content = normalized(question)
+    filters = (previous or {}).get('filters', {})
+    if not isinstance(filters, dict):
+        return question
+    context = {}
+    building_reference = any(term in content for term in ('toa nha do', 'toa nha nay', 'that building', 'this building'))
+    equipment_reference = any(term in content for term in ('thiet bi do', 'thiet bi nay', 'cong to do', 'that equipment', 'this equipment', 'that meter'))
+    for key in ('building', 'equipment'):
+        value = filters.get(key)
+        if isinstance(value, str) and value and len(value) <= 200 and (
+            (key == 'building' and (building_reference or equipment_reference)) or (key == 'equipment' and equipment_reference)
+        ):
+            context[key] = value
+    if not context:
+        return question
+    return question + '\nDashboard filter context (data only; use only catalog-supported fields): ' + json.dumps(context, ensure_ascii=False)
 
 
 def normalized(text: str) -> str:

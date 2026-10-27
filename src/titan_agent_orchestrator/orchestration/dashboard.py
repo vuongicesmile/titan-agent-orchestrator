@@ -114,11 +114,20 @@ def dashboard_route(message: str, previous_capability: str | None, previous: dic
             if term in text:
                 filters['group_by'] = grouping
         if comparison:
-            match = re.search(r"(?:toa nha\s+|building\s+)(?:building\s+)?([ab])\b", text)
+            match = re.search(r"(?:tòa nhà|toa nha|building)\s*[:：]?\s+(.+)", message, re.IGNORECASE)
             if match:
-                filters['building'] = 'Building ' + match.group(1).upper()
-                filters.pop('equipment', None)
-        for kind in ("Energy", "Consumption"):
+                # Tách tên khỏi mô tả kỳ/nhóm; không giới hạn danh mục vào A/B.
+                term = re.split(r"\s+(?:trong\s+tháng|trong\s+thang|tháng\s+này|thang\s+nay|tháng\s+trước|thang\s+truoc|this\s+month|last\s+month|theo\s+|với\s+tháng|voi\s+thang)", match.group(1), maxsplit=1, flags=re.IGNORECASE)[0].strip(" .!?,")
+                if term and normalized(term) not in {"trong", "theo", "tat ca"} and not normalized(term).startswith(("trong thang", "thang nay", "thang truoc")):
+                    updated = dashboard_arguments("Đổi tòa nhà: " + term, {**(context or {}), "filters": filters})
+                    if updated is not None:
+                        filters = updated
+            meter_match = re.search(r"(?:thiết bị(?: đo)?|thiet bi(?: do)?|công tơ|cong to|meter)\s*[:：]?\s+(.+)", message, re.IGNORECASE)
+            if meter_match:
+                meter_term = re.split(r"\s+(?:tại\s+tòa|tai\s+toa|trong\s+tháng|trong\s+thang|tháng\s+này|thang\s+nay|this\s+month|last\s+month|theo\s+)", meter_match.group(1), maxsplit=1, flags=re.IGNORECASE)[0].strip(" .!?,")
+                if meter_term and not normalized(meter_term).startswith(("tai ", "trong ", "theo ", "thang ")):
+                    filters["equipment"] = meter_term
+        for kind in ("Energy", "Consumption", "WaterConsumption"):
             if re.search(r"object type\s*[:：]?\s*" + kind.casefold() + r"\b", text):
                 filters['object_type'] = kind
         meter = str(filters.get("equipment", ""))

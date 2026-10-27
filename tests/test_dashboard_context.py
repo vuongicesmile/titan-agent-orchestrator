@@ -56,6 +56,36 @@ def test_comparison_does_not_inherit_inventory_filters():
     assert dashboard_route("So sánh điện năng tháng này với tháng trước", "fm.get_bms_dashboard", {"filters": {"building": "Retail"}}) == ("fm.get_energy_comparison", {"metric": "electricity"})
 
 
+def test_comparison_accepts_actual_building_names_and_source_ids():
+    for term in ("Retail Hà Nội 120", "spo_samples:BLD120"):
+        route, arguments = dashboard_route(f"So sánh điện năng tại tòa nhà {term} tháng này với tháng trước", None, None)
+        assert route == "fm.get_energy_comparison"
+        assert arguments["building"] == term
+        assert arguments["metric"] == "electricity"
+
+
+def test_comparison_followup_preserves_actual_building_context():
+    previous = {"filters": {"building": "spo_samples:BLD120", "metric": "electricity", "equipment": "spo_samples:EM120-1"}}
+    assert dashboard_route("Đổi sang nước", "fm.get_energy_comparison", previous) == (
+        "fm.get_energy_comparison", {"building": "spo_samples:BLD120", "metric": "water"})
+
+
+def test_comparison_grouping_does_not_become_a_building_name():
+    assert dashboard_route("So sánh điện theo tòa nhà trong tháng này", None, None) == (
+        "fm.get_energy_comparison", {"metric": "electricity", "group_by": "building"})
+
+
+def test_initial_comparison_keeps_source_qualified_meter_id():
+    _, arguments = dashboard_route("So sánh điện công tơ spo_samples:EM120-2 tháng này với tháng trước", None, None)
+    assert arguments["equipment"] == "spo_samples:EM120-2"
+
+
+def test_group_by_equipment_does_not_add_location_as_meter():
+    _, arguments = dashboard_route("So sánh nước theo thiết bị tại tòa nhà Retail Hà Nội 120", None, None)
+    assert arguments["building"] == "Retail Hà Nội 120"
+    assert "equipment" not in arguments
+
+
 def test_water_comparison_and_followup_grouping():
     assert dashboard_route("So sánh nước tháng này với tháng trước theo thiết bị tại tòa nhà A", None, None) == ("fm.get_energy_comparison", {"metric": "water", "group_by": "equipment", "building": "Building A"})
     previous = {"filters": {"metric": "electricity", "building": "Building A", "equipment": "demo:MAIN-A", "object_type": "Energy"}}
